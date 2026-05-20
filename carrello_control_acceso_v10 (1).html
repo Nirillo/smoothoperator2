@@ -1,0 +1,1490 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<title>Control de Acceso · Carrello</title>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/emailjs-com@3/dist/email.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;background:#F1F5F9;min-height:100vh;overscroll-behavior:none}
+input,textarea,select{-webkit-user-select:text;user-select:text;font-family:inherit}
+button{cursor:pointer}
+button:active{opacity:.75;transform:scale(.97)}
+::-webkit-scrollbar{width:3px}
+::-webkit-scrollbar-thumb{background:#334;border-radius:2px}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+@keyframes scaleIn{from{opacity:0;transform:scale(.93)}to{opacity:1;transform:scale(1)}}
+@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}
+@keyframes progress{from{width:0}to{width:100%}}
+@keyframes spin{to{transform:rotate(360deg)}}
+#mblock{display:none;position:fixed;inset:0;background:#0F172A;z-index:99999;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:2rem;gap:16px}
+</style>
+</head>
+<body>
+<div id="mblock">
+<div style="font-size:52px">&#128187;</div>
+<h2 style="color:#fff;font-size:22px;font-weight:800;margin:0">Solo desde computadora</h2>
+<p style="color:#94A3B8;font-size:14px;line-height:1.6;max-width:280px;margin:0">Por politica de la empresa el registro debe realizarse desde una laptop o PC.</p>
+</div>
+<div id="root"></div>
+<script>
+(function(){
+  // Restricción de dispositivo/tamaño desactivada: la app es accesible desde cualquier dispositivo (incluido iPhone).
+  document.getElementById('mblock').style.display='none';
+  document.getElementById('root').style.display='';
+})();
+</script>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback,useMemo}=React;
+
+/* ══ FIREBASE ════════════════════════════════════════════ */
+firebase.initializeApp({
+  apiKey:"AIzaSyBquaFNRHtAsfz9rcj1U9fnxLIAYICh76Y",
+  authDomain:"carrello-acceso.firebaseapp.com",
+  projectId:"carrello-acceso",
+  storageBucket:"carrello-acceso.firebasestorage.app",
+  messagingSenderId:"193300133837",
+  appId:"1:193300133837:web:561d7e3834ab6e4d473684"
+});
+const db=firebase.firestore();
+const col=name=>db.collection(name);
+
+/* ══ TOKENS ══════════════════════════════════════════════ */
+const T={
+  navy:'#0F172A',navy2:'#1E293B',navy3:'#1E3A5F',
+  green:'#16A34A',greenBg:'#F0FDF4',greenBd:'#A7F3D0',
+  red:'#EF4444',redBg:'#FFF1F2',redBd:'#FECACA',
+  amber:'#d97706',amberBg:'#fffbeb',amberBd:'#fde68a',
+  purple:'#7c3aed',purpleBg:'#f5f3ff',purpleBd:'#ddd6fe',
+  white:'#FFFFFF',border:'#E2E8F0',
+  text:'#0F172A',text2:'#475569',text3:'#94A3B8',
+  grayBg:'#F8FAFC',grayBd:'#E2E8F0',bg:'#F1F5F9',
+};
+const CO={
+  carrello:{name:'Carrello',color:T.navy3,badge:'CA',bg:'#e8eef7'},
+  pronti:{name:'Pronti a Casa',color:T.purple,badge:'PC',bg:T.purpleBg},
+};
+
+/* ══ UTILS ════════════════════════════════════════════════ */
+const uid=()=>Math.random().toString(36).slice(2,9);
+const checkSchedule=(emp,rec)=>{
+  if(!emp||rec.type==='salida')return null;
+  const expected=emp.horaEntrada||'09:00';
+  const [eh,em]=expected.split(':').map(Number);
+  const d=new Date(rec.ts);
+  const rh=d.getHours(),rm=d.getMinutes();
+  const diffMin=(rh*60+rm)-(eh*60+em);
+  if(diffMin>10)return{late:true,min:diffMin};
+  return null;
+};
+const sendEmailToEmp=(cfg,emp,subject,body)=>{
+  if(!cfg?.emailjsPublicKey||!emp?.email)return;
+  try{
+    emailjs.init(cfg.emailjsPublicKey);
+    emailjs.send(cfg.emailjsServiceId,cfg.emailjsTemplateId,{
+      to_email:emp.email,
+      employee_name:emp.nombre,employee_rol:emp.rol,
+      hours:subject,date:'',reason:body,type:'Notificacion del sistema',
+    }).catch(e=>console.warn('EmailJS emp:',e));
+  }catch(e){console.warn(e);}
+};
+const nowTs=()=>Date.now();
+const todayStr=()=>new Date().toDateString();
+const fmtTime=ts=>new Date(ts).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'});
+const fmtDate=ts=>new Date(ts).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'numeric'});
+const fmtDateShort=ts=>new Date(ts).toLocaleDateString('es-AR',{weekday:'short',day:'numeric',month:'short'});
+const todayISO=()=>new Date().toISOString().slice(0,10);
+function fmtMs(ms){
+  if(!ms||ms<=0)return'—';
+  const h=Math.floor(ms/3600000),m=Math.floor((ms%3600000)/60000);
+  return h>0?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m`;
+}
+function calcDayMs(empId,records,dateStr){
+  const recs=records.filter(r=>r.empId===empId&&new Date(r.ts).toDateString()===dateStr).sort((a,b)=>a.ts-b.ts);
+  let total=0,last=null;
+  for(const r of recs){if(r.type==='entrada')last=r.ts;else if(last!=null){total+=r.ts-last;last=null;}}
+  if(last!=null)total+=nowTs()-last;
+  return total;
+}
+
+/* ══ SEED DATA ════════════════════════════════════════════ */
+const SEED=[
+  {id:'e04',nombre:'Rocío Delavy',      rol:'Ventas',           company:'carrello',pin:'1234'},
+  {id:'e05',nombre:'Julián Perelda',    rol:'Ventas',           company:'carrello',pin:'1234'},
+  {id:'e06',nombre:'Fabio Burgra',      rol:'Ops & Full',       company:'carrello',pin:'1234'},
+  {id:'e07',nombre:'Martina Bollati',   rol:'Marketing',        company:'carrello',pin:'1234'},
+  {id:'e08',nombre:'Juliana Gabriani',  rol:'Marketing',        company:'carrello',pin:'1234'},
+  {id:'e10',nombre:'Milton Astrada',    rol:'Logística',        company:'carrello',pin:'1234'},
+  {id:'e11',nombre:'Matías Cuadrado',   rol:'Depósito',         company:'carrello',pin:'1234'},
+  {id:'e12',nombre:'Brian Rivero',      rol:'Depósito',         company:'carrello',pin:'1234'},
+  {id:'e13',nombre:'Facundo Lione',     rol:'Compras',          company:'carrello',pin:'1234'},
+  {id:'e14',nombre:'Juan Pablo Celada', rol:'Compras',          company:'carrello',pin:'1234'},
+  {id:'e15',nombre:'Esteban Carletti',  rol:'Compras',          company:'carrello',pin:'1234'},
+  {id:'e16',nombre:'Tobías Rinero',     rol:'Compras',          company:'carrello',pin:'1234'},
+  {id:'e17',nombre:'Natalia Miloc',     rol:'Admin. & Finanzas',company:'carrello',pin:'1234'},
+  {id:'e18',nombre:'Enzo Burgra',       rol:'Postventa',        company:'carrello',pin:'1234'},
+  {id:'e19',nombre:'Elina Bossio',      rol:'Sin área',         company:'carrello',pin:'1234'},
+  {id:'e21',nombre:'Efraín Molina',     rol:'Compras',          company:'pronti',  pin:'1234'},
+  {id:'e22',nombre:'Román Jaime',       rol:'Compras',          company:'pronti',  pin:'1234'},
+  {id:'e23',nombre:'Pablo Ventura',     rol:'Compras',          company:'pronti',  pin:'1234'},
+];
+
+/* ══ FIRESTORE OPS ════════════════════════════════════════ */
+const ops={
+  addEmp:    emp=>col('employees').doc(emp.id).set(emp),
+  updateEmp: (id,data)=>col('employees').doc(id).update(data),
+  deleteEmp: id=>col('employees').doc(id).delete(),
+  addRecord: rec=>col('records').doc(rec.id).set(rec),
+  clearRecords: async()=>{
+    const snap=await col('records').get();
+    const batch=db.batch();
+    snap.docs.forEach(d=>batch.delete(d.ref));
+    return batch.commit();
+  },
+  addOvt:    ovt=>col('overtime').doc(ovt.id).set(ovt),
+  updateOvt: (id,data)=>col('overtime').doc(id).update(data),
+  addLic:    lic=>col('licenses').doc(lic.id).set(lic),
+  updateLic: (id,data)=>col('licenses').doc(id).update(data),
+  updateCfg: data=>col('config').doc('main').set(data,{merge:true}),
+};
+
+/* ══ APP ROOT ═════════════════════════════════════════════ */
+function App(){
+  const [employees,setEmps]=useState([]);
+  const [records,setRecs]=useState([]);
+  const [overtime,setOvt]=useState([]);
+  const [cfg,setCfg]=useState({directorPin:'0000'});
+  const [ready,setReady]=useState(false);
+  const [session,setSession]=useState(null);
+  const [toast,setToast]=useState(null);
+  const toastRef=useRef();
+  const autoLogoutRef=useRef();
+  const prevOvtCountRef=useRef(null);
+  const prevLicCountRef=useRef(null);
+  const [ovtAlert,setOvtAlert]=useState(null);
+  const [licAlert,setLicAlert]=useState(null);
+  const [licenses,setLic]=useState([]);
+
+  // ── Firestore real-time listeners ──
+  useEffect(()=>{
+    let loaded={emp:false,rec:false,ovt:false,cfg:false,lic:false};
+    const check=()=>{if(Object.values(loaded).every(Boolean))setReady(true);};
+
+    const u1=col('employees').onSnapshot(snap=>{
+      const data=snap.docs.map(d=>({...d.data(),id:d.id}));
+      // Seed if empty
+      if(data.length===0&&!loaded.emp){
+        const batch=db.batch();
+        SEED.forEach(e=>batch.set(col('employees').doc(e.id),e));
+        batch.commit();
+      } else {
+        setEmps(data);
+      }
+      loaded.emp=true;check();
+    });
+
+    const u2=col('records').onSnapshot(snap=>{
+      setRecs(snap.docs.map(d=>({...d.data(),id:d.id})));
+      loaded.rec=true;check();
+    });
+
+    const u3=col('overtime').onSnapshot(snap=>{
+      const data=snap.docs.map(d=>({...d.data(),id:d.id}));
+      setOvt(data);
+      // Detect new pending overtime and alert director
+      const pendingNow=data.filter(o=>o.status==='pendiente');
+      if(prevOvtCountRef.current!==null && pendingNow.length>prevOvtCountRef.current){
+        const newest=pendingNow.sort((a,b)=>b.createdAt-a.createdAt)[0];
+        setOvtAlert(newest);
+        setTimeout(()=>setOvtAlert(null),8000);
+      }
+      prevOvtCountRef.current=pendingNow.length;
+      loaded.ovt=true;check();
+    });
+
+    const u4=col('config').doc('main').onSnapshot(snap=>{
+      if(snap.exists){setCfg(snap.data());}
+      else{ops.updateCfg({directorPin:'0000'});}
+      loaded.cfg=true;check();
+    });
+
+    const u5=col('licenses').onSnapshot(snap=>{
+      const data=snap.docs.map(d=>({...d.data(),id:d.id}));
+      setLic(data);
+      const pendingNow=data.filter(l=>l.status==='pendiente');
+      if(prevLicCountRef.current!==null&&pendingNow.length>prevLicCountRef.current){
+        const newest=pendingNow.sort((a,b)=>b.createdAt-a.createdAt)[0];
+        setLicAlert(newest);
+        setTimeout(()=>setLicAlert(null),8000);
+      }
+      prevLicCountRef.current=pendingNow.length;
+      loaded.lic=true;check();
+    });
+
+    return()=>{u1();u2();u3();u4();u5();};
+  },[]);
+
+  const showToast=useCallback((msg,ok=true)=>{
+    clearTimeout(toastRef.current);
+    setToast({msg,ok});
+    toastRef.current=setTimeout(()=>setToast(null),3000);
+  },[]);
+
+  const logout=useCallback(()=>{clearTimeout(autoLogoutRef.current);setSession(null);},[]);
+
+  const resetAutoLogout=useCallback(()=>{
+    if(!session||session.type==='director')return;
+    clearTimeout(autoLogoutRef.current);
+    autoLogoutRef.current=setTimeout(logout,60000);
+  },[session,logout]);
+
+  useEffect(()=>{
+    if(session?.type==='employee'){
+      resetAutoLogout();
+      const evs=['touchstart','click','keydown'];
+      evs.forEach(e=>window.addEventListener(e,resetAutoLogout));
+      return()=>{evs.forEach(e=>window.removeEventListener(e,resetAutoLogout));clearTimeout(autoLogoutRef.current);};
+    }
+  },[session,resetAutoLogout]);
+
+  const getStatus=useCallback(empId=>{
+    const last=records.filter(r=>r.empId===empId&&new Date(r.ts).toDateString()===todayStr()).sort((a,b)=>b.ts-a.ts)[0];
+    if(!last)return'ausente';
+    return last.type==='entrada'?'adentro':'afuera';
+  },[records]);
+
+  const register=useCallback(empId=>{
+    const status=getStatus(empId);
+    const type=status==='adentro'?'salida':'entrada';
+    const ts=nowTs();
+    if(navigator.geolocation){
+      navigator.geolocation.getCurrentPosition(
+        function(pos){ops.addRecord({id:uid(),empId:empId,type:type,ts:ts,geo:{lat:pos.coords.latitude,lng:pos.coords.longitude,acc:Math.round(pos.coords.accuracy)}});},
+        function(){ops.addRecord({id:uid(),empId:empId,type:type,ts:ts,geo:null});},
+        {timeout:5000,maximumAge:0}
+      );
+    } else { ops.addRecord({id:uid(),empId:empId,type:type,ts:ts,geo:null}); }
+    return type;
+  },[getStatus]);
+
+  // ── Loading screen ──
+  if(!ready) return(
+    <div style={{minHeight:'100vh',background:T.navy,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:16}}>
+      <div style={{width:40,height:40,border:'3px solid rgba(255,255,255,0.15)',borderTop:'3px solid rgba(255,255,255,0.7)',borderRadius:'50%',animation:'spin 1s linear infinite'}}/>
+      <div style={{color:'rgba(255,255,255,0.45)',fontSize:13,letterSpacing:.5}}>Conectando…</div>
+    </div>
+  );
+
+  if(!session) return(
+    <>
+      <LockScreen employees={employees} cfg={cfg} onLogin={(type,empId)=>{clearTimeout(autoLogoutRef.current);setSession(type==='director'?{type:'director'}:{type:'employee',empId});}} showToast={showToast}/>
+      {toast&&<Toast toast={toast}/>}
+    </>
+  );
+
+  if(session.type==='employee'){
+    const emp=employees.find(e=>e.id===session.empId);
+    if(!emp){setSession(null);return null;}
+    return(
+      <>
+        <EmployeeView emp={emp} employees={employees} records={records} overtime={overtime} licenses={licenses} cfg={cfg} getStatus={getStatus} register={register} onLogout={logout} showToast={showToast}/>
+        {toast&&<Toast toast={toast}/>}
+      </>
+    );
+  }
+
+  return(
+    <>
+      <DirectorView employees={employees} records={records} overtime={overtime} licenses={licenses} cfg={cfg} getStatus={getStatus} onLogout={logout} showToast={showToast}/>
+      {toast&&<Toast toast={toast}/>}
+      {ovtAlert&&session?.type==='director'&&<OvtAlertBanner ovt={ovtAlert} employees={employees} onClose={()=>setOvtAlert(null)}/>
+      }{licAlert&&session?.type==='director'&&<LicAlertBanner lic={licAlert} employees={employees} onClose={()=>setLicAlert(null)}/>}
+    </>
+  );
+}
+
+/* ══ LOCK SCREEN ══════════════════════════════════════════ */
+function LockScreen({employees,cfg,onLogin}){
+  const [selected,setSelected]=useState(null);
+  const [pin,setPin]=useState('');
+  const [shake,setShake]=useState(false);
+  const [showDir,setShowDir]=useState(false);
+  const [dirPin,setDirPin]=useState('');
+  const [dirShake,setDirShake]=useState(false);
+  const [search,setSearch]=useState('');
+  const doShake=fn=>{fn(true);setTimeout(()=>fn(false),500);};
+
+  const handleDigit=d=>{
+    if(pin.length>=4)return;
+    const next=pin+d;setPin(next);
+    if(next.length===4){
+      setTimeout(()=>{
+        if(next===selected.pin)onLogin('employee',selected.id);
+        else{doShake(setShake);setPin('');}
+      },120);
+    }
+  };
+
+  const handleDirDigit=d=>{
+    if(dirPin.length>=6)return;
+    const next=dirPin+d;setDirPin(next);
+    if(next.length===(cfg.directorPin||'0000').length){
+      setTimeout(()=>{
+        if(next===cfg.directorPin)onLogin('director');
+        else{doShake(setDirShake);setDirPin('');}
+      },120);
+    }
+  };
+
+  const filtered=employees.filter(e=>search===''||e.nombre.toLowerCase().includes(search.toLowerCase()));
+  const grouped={carrello:filtered.filter(e=>e.company==='carrello'),pronti:filtered.filter(e=>e.company==='pronti')};
+
+  if(selected) return(
+    <div style={{minHeight:'100vh',background:T.navy,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:24,animation:'fadeIn .2s ease'}}>
+      <button onClick={()=>{setSelected(null);setPin('');}} style={{position:'absolute',top:20,left:20,background:'rgba(255,255,255,0.1)',border:'none',color:'rgba(255,255,255,0.6)',borderRadius:8,padding:'8px 14px',fontSize:13}}>← Volver</button>
+      <div style={{width:64,height:64,borderRadius:'50%',background:CO[selected.company]?.color||T.navy3,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,fontWeight:700,color:T.white,marginBottom:12,boxShadow:'0 4px 20px rgba(0,0,0,.4)'}}>
+        {selected.nombre.charAt(0)}
+      </div>
+      <div style={{color:T.white,fontSize:20,fontWeight:700,marginBottom:4}}>{selected.nombre}</div>
+      <div style={{color:'rgba(255,255,255,0.45)',fontSize:13,marginBottom:36}}>{selected.rol} · {CO[selected.company]?.name}</div>
+      <div style={{display:'flex',gap:14,marginBottom:36,animation:shake?'shake .4s ease':'none'}}>
+        {[0,1,2,3].map(i=><div key={i} style={{width:14,height:14,borderRadius:'50%',background:i<pin.length?T.white:'rgba(255,255,255,0.2)',transition:'background .15s'}}/>)}
+      </div>
+      <Numpad onDigit={handleDigit} onDelete={()=>setPin(p=>p.slice(0,-1))}/>
+      <div style={{marginTop:20,color:'rgba(255,255,255,0.3)',fontSize:12}}>PIN personal de 4 dígitos</div>
+    </div>
+  );
+
+  if(showDir) return(
+    <div style={{minHeight:'100vh',background:T.navy,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:24,animation:'fadeIn .2s ease'}}>
+      <button onClick={()=>{setShowDir(false);setDirPin('');}} style={{position:'absolute',top:20,left:20,background:'rgba(255,255,255,0.1)',border:'none',color:'rgba(255,255,255,0.6)',borderRadius:8,padding:'8px 14px',fontSize:13}}>← Volver</button>
+      <div style={{fontSize:40,marginBottom:14}}>🔑</div>
+      <div style={{color:T.white,fontSize:20,fontWeight:700,marginBottom:4}}>Acceso Director</div>
+      <div style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:36}}>Vista consolidada · tiempo real</div>
+      <div style={{display:'flex',gap:12,marginBottom:36,animation:dirShake?'shake .4s ease':'none'}}>
+        {Array.from({length:(cfg.directorPin||'0000').length}).map((_,i)=><div key={i} style={{width:13,height:13,borderRadius:'50%',background:i<dirPin.length?T.white:'rgba(255,255,255,0.2)',transition:'background .15s'}}/>)}
+      </div>
+      <Numpad onDigit={handleDirDigit} onDelete={()=>setDirPin(p=>p.slice(0,-1))}/>
+    </div>
+  );
+
+  return(
+    <div style={{minHeight:'100vh',background:T.navy,display:'flex',flexDirection:'column'}}>
+      <div style={{padding:'24px 20px 14px',textAlign:'center'}}>
+        <div style={{color:T.white,fontSize:11,letterSpacing:3,fontWeight:700,opacity:.35,marginBottom:6}}>CONTROL DE ACCESO</div>
+        <div style={{color:T.white,fontSize:32,fontWeight:700,fontFamily:'monospace',letterSpacing:1}}><LiveClock/></div>
+        <div style={{color:'rgba(255,255,255,0.45)',fontSize:13,marginTop:4,textTransform:'capitalize'}}>{new Date().toLocaleDateString('es-AR',{weekday:'long',day:'numeric',month:'long'})}</div>
+      </div>
+      <div style={{padding:'0 16px 12px'}}>
+        <div style={{position:'relative'}}>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar empleado…" style={{width:'100%',padding:'11px 12px 11px 36px',background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.12)',borderRadius:10,color:T.white,fontSize:14,outline:'none'}}/>
+          <span style={{position:'absolute',left:12,top:'50%',transform:'translateY(-50%)',color:'rgba(255,255,255,0.35)',fontSize:15}}>⌕</span>
+        </div>
+      </div>
+      <div style={{flex:1,overflowY:'auto',padding:'0 16px 16px'}}>
+        {Object.entries(grouped).map(([key,emps])=>{
+          if(emps.length===0)return null;
+          const co=CO[key];
+          return(
+            <div key={key} style={{marginBottom:16}}>
+              <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:8}}>
+                <div style={{width:6,height:6,borderRadius:'50%',background:key==='pronti'?'#a78bfa':'rgba(255,255,255,0.35)'}}/>
+                <span style={{fontSize:10,fontWeight:700,color:key==='pronti'?'#a78bfa':'rgba(255,255,255,0.35)',letterSpacing:1.5}}>{co.name.toUpperCase()}</span>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
+                {emps.map(emp=>(
+                  <button key={emp.id} onClick={()=>{setSelected(emp);setPin('');}} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:12,padding:'14px 8px',display:'flex',flexDirection:'column',alignItems:'center',gap:6,color:T.white,textAlign:'center'}}>
+                    <div style={{width:42,height:42,borderRadius:'50%',background:key==='pronti'?'rgba(124,58,237,0.5)':'rgba(255,255,255,0.12)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,fontWeight:700}}>
+                      {emp.nombre.charAt(0)}
+                    </div>
+                    <div style={{fontSize:11,fontWeight:600,lineHeight:1.2,opacity:.9}}>{emp.nombre.split(' ')[0]}</div>
+                    <div style={{fontSize:9,opacity:.4,lineHeight:1.2}}>{emp.rol}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{padding:'12px 16px',borderTop:'1px solid rgba(255,255,255,0.07)'}}>
+        <button onClick={()=>{setShowDir(true);setDirPin('');}} style={{width:'100%',padding:13,background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:10,color:'rgba(255,255,255,0.35)',fontSize:13,fontWeight:500,letterSpacing:.3}}>
+          🔑 Acceso Director
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ══ NUMPAD ═══════════════════════════════════════════════ */
+function Numpad({onDigit,onDelete}){
+  return(
+    <div style={{display:'grid',gridTemplateColumns:'repeat(3,72px)',gap:10}}>
+      {[1,2,3,4,5,6,7,8,9,null,0,'⌫'].map((k,i)=>k===null?<div key={i}/>:(
+        <button key={i} onClick={()=>k==='⌫'?onDelete():onDigit(String(k))} style={{width:72,height:72,borderRadius:'50%',background:k==='⌫'?'rgba(255,255,255,0.05)':'rgba(255,255,255,0.1)',border:'1px solid rgba(255,255,255,0.12)',color:T.white,fontSize:k==='⌫'?20:24,fontWeight:400,display:'flex',alignItems:'center',justifyContent:'center'}}>
+          {k}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function LiveClock(){
+  const [t,setT]=useState(fmtTime(Date.now()));
+  useEffect(()=>{const i=setInterval(()=>setT(fmtTime(Date.now())),10000);return()=>clearInterval(i);},[]);
+  return<>{t}</>;
+}
+
+/* ══ EMPLOYEE VIEW ════════════════════════════════════════ */
+function EmployeeView({emp,employees,records,overtime,licenses,cfg,getStatus,register,onLogout,showToast}){
+  const [tab,setTab]=useState('home');
+  const [confirmType,setConfirmType]=useState(null);
+  const co=CO[emp.company]||{};
+  const status=getStatus(emp.id);
+  const isIn=status==='adentro';
+  const todayMs=calcDayMs(emp.id,records,todayStr());
+  const todayRecs=useMemo(()=>records.filter(r=>r.empId===emp.id&&new Date(r.ts).toDateString()===todayStr()).sort((a,b)=>a.ts-b.ts),[records,emp.id]);
+  const myOvt=useMemo(()=>overtime.filter(o=>o.empId===emp.id).sort((a,b)=>b.createdAt-a.createdAt),[overtime,emp.id]);
+  const myLic=useMemo(()=>licenses.filter(l=>l.empId===emp.id).sort((a,b)=>b.createdAt-a.createdAt),[licenses,emp.id]);
+
+  const handleRegister=()=>{
+    const type=register(emp.id);
+    showToast(type==='entrada'?'Entrada registrada ✓':'Salida registrada',type==='entrada');
+    setConfirmType(null);
+  };
+
+  const TABS=[
+    {id:'home',label:'Mi día',Icon:IcoDash},
+    {id:'history',label:'Historial',Icon:IcoList},
+    {id:'licencias',label:'Licencias',Icon:IcoCalendar},
+    {id:'extra',label:'Extras',Icon:IcoClock2},
+    {id:'settings',label:'Cuenta',Icon:IcoSettings},
+  ];
+
+  return(
+    <div style={{maxWidth:520,margin:'0 auto',minHeight:'100vh',display:'flex',flexDirection:'column',background:T.white}}>
+      <div style={{background:co.color||T.navy,flexShrink:0}}>
+        <div style={{padding:'14px 16px 12px',display:'flex',alignItems:'center',gap:10}}>
+          <div style={{width:36,height:36,borderRadius:'50%',background:'rgba(255,255,255,0.15)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:15,fontWeight:700,color:T.white,flexShrink:0}}>{emp.nombre.charAt(0)}</div>
+          <div>
+            <div style={{color:T.white,fontSize:15,fontWeight:700}}>{emp.nombre}</div>
+            <div style={{color:'rgba(255,255,255,0.5)',fontSize:11}}>{emp.rol} · {co.name}</div>
+          </div>
+          <button onClick={onLogout} style={{marginLeft:'auto',background:'rgba(255,255,255,0.1)',border:'none',color:'rgba(255,255,255,0.6)',borderRadius:8,padding:'7px 12px',fontSize:12}}>Salir</button>
+        </div>
+      </div>
+      <main style={{flex:1,overflowY:'auto',WebkitOverflowScrolling:'touch'}}>
+        {tab==='home'&&<EmpHome emp={emp} isIn={isIn} todayMs={todayMs} todayRecs={todayRecs} onAction={()=>setConfirmType(isIn?'salida':'entrada')}/>}
+        {tab==='history'&&<EmpHistory emp={emp} records={records}/>}
+        {tab==='licencias'&&<EmpLicencias emp={emp} myLic={myLic} cfg={cfg} showToast={showToast}/>}
+        {tab==='extra'&&<EmpExtra emp={emp} myOvt={myOvt} myLic={myLic} showToast={showToast} cfg={cfg}/>}
+        {tab==='settings'&&<EmpSettings emp={emp} showToast={showToast}/>}
+      </main>
+      <nav style={{background:T.white,borderTop:`1px solid ${T.border}`,display:'flex',flexShrink:0}}>
+        {TABS.map(({id,label,Icon})=>{
+          const active=tab===id;
+          const badge=(id==='extra'&&myOvt.filter(o=>o.status==='pendiente').length)||(id==='licencias'&&myLic.filter(l=>l.status==='pendiente').length);
+          return(
+            <button key={id} onClick={()=>setTab(id)} style={{flex:1,padding:'9px 2px 10px',border:'none',background:'transparent',color:active?(co.color||T.navy):T.text3,borderTop:`2px solid ${active?(co.color||T.navy):'transparent'}`,fontSize:8.5,fontWeight:active?700:400,letterSpacing:.3,display:'flex',flexDirection:'column',alignItems:'center',gap:3,position:'relative'}}>
+              <Icon/>{label.toUpperCase()}
+              {badge>0&&<span style={{position:'absolute',top:5,right:'50%',marginRight:-16,width:15,height:15,borderRadius:'50%',background:T.amber,color:T.white,fontSize:8,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center'}}>{badge}</span>}
+            </button>
+          );
+        })}
+      </nav>
+      {confirmType&&<ConfirmOverlay type={confirmType} onConfirm={handleRegister} onCancel={()=>setConfirmType(null)}/>}
+    </div>
+  );
+}
+
+function EmpHome({emp,isIn,todayMs,todayRecs,onAction}){
+  const co=CO[emp.company]||{};
+  const col=isIn?T.green:(co.color||T.navy);
+  const segs=[];let last=null;
+  for(const r of todayRecs){if(r.type==='entrada')last=r;else if(last){segs.push({in:last,out:r,ms:r.ts-last.ts});last=null;}}
+  if(last)segs.push({in:last,out:null,ms:nowTs()-last.ts});
+  return(
+    <div style={{padding:16}}>
+      <div style={{background:isIn?T.greenBg:'#f0f4ff',border:`2px solid ${isIn?T.greenBd:'#c7d9f8'}`,borderRadius:16,padding:24,textAlign:'center',marginBottom:16}}>
+        <div style={{fontSize:13,color:T.text3,marginBottom:4}}>{new Date().toLocaleDateString('es-AR',{weekday:'long',day:'numeric',month:'long'})}</div>
+        <div style={{fontSize:44,fontWeight:700,color:col,marginBottom:4}}>{fmtMs(todayMs)||'0m'}</div>
+        <div style={{fontSize:13,color:T.text3,marginBottom:20}}>
+          {isIn?`Trabajando desde ${fmtTime(todayRecs.filter(r=>r.type==='entrada').slice(-1)[0]?.ts||0)}`:segs.length>0?'Fuera del trabajo':'Sin registros hoy'}
+        </div>
+        <button onClick={onAction} style={{padding:'14px 40px',background:isIn?T.red:T.green,color:T.white,border:'none',borderRadius:12,fontSize:16,fontWeight:700,boxShadow:`0 4px 16px ${isIn?'rgba(220,38,38,.3)':'rgba(22,163,74,.3)'}`}}>
+          {isIn?'↑ Registrar salida':'→ Registrar entrada'}
+        </button>
+      </div>
+      {todayRecs.length>0&&(
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:12,overflow:'hidden'}}>
+          <div style={{padding:'10px 14px',background:'#f8f9fb',borderBottom:`1px solid ${T.border}`,display:'flex',justifyContent:'space-between'}}>
+            <span style={{fontSize:11,fontWeight:700,color:T.text3,letterSpacing:.6}}>MOVIMIENTOS HOY</span>
+            <span style={{fontSize:12,fontWeight:700,color:T.navy}}>{segs.length} tramo{segs.length!==1?'s':''} · {fmtMs(todayMs)}</span>
+          </div>
+          <div style={{padding:'8px 14px'}}>
+            {todayRecs.map((r,i)=>{
+              const isE=r.type==='entrada';
+              const next=todayRecs[i+1];
+              const isPause=!isE&&next&&next.type==='entrada';
+              return(
+                <div key={r.id}>
+                  <div style={{display:'flex',alignItems:'center',gap:10,padding:'6px 0'}}>
+                    <div style={{width:28,height:28,borderRadius:'50%',background:isE?T.greenBg:'#f3f4f6',border:`1px solid ${isE?T.greenBd:T.grayBd}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,color:isE?T.green:T.text3,fontWeight:700,flexShrink:0}}>{isE?'→':'←'}</div>
+                    <span style={{flex:1,fontSize:13,fontWeight:600,color:isE?T.green:T.text2}}>{isE?'Entrada':'Salida'}</span>
+                    <span style={{fontSize:13,fontFamily:'monospace',color:T.text}}>{fmtTime(r.ts)}</span>
+                  </div>
+                  {isPause&&(
+                    <div style={{display:'flex',alignItems:'center',gap:8,padding:'2px 0 2px 38px'}}>
+                      <div style={{flex:1,borderTop:'1px dashed #e5e7eb'}}/>
+                      <span style={{fontSize:11,color:T.text3,background:'#f9fafb',padding:'2px 8px',borderRadius:8,border:`1px solid ${T.border}`,whiteSpace:'nowrap'}}>pausa {fmtMs(next.ts-r.ts)}</span>
+                      <div style={{flex:1,borderTop:'1px dashed #e5e7eb'}}/>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EmpHistory({emp,records}){
+  const [range,setRange]=useState('week');
+  const dr=useMemo(()=>{const d=new Date();if(range==='week'){const s=new Date(d);s.setDate(s.getDate()-6);s.setHours(0,0,0,0);return[s,new Date()];}if(range==='month'){const s=new Date(d);s.setDate(s.getDate()-29);s.setHours(0,0,0,0);return[s,new Date()];}return[new Date(0),new Date()];},[range]);
+  const mine=records.filter(r=>{if(r.empId!==emp.id)return false;const ts=new Date(r.ts);return ts>=dr[0]&&ts<=dr[1];});
+  const byDate={};mine.forEach(r=>{const d=new Date(r.ts).toDateString();if(!byDate[d])byDate[d]=[];byDate[d].push(r);});
+  const days=Object.entries(byDate).sort((a,b)=>new Date(b[0])-new Date(a[0]));
+  return(
+    <div style={{padding:16}}>
+      <div style={{display:'flex',gap:6,marginBottom:14}}>
+        {[{v:'week',l:'7 días'},{v:'month',l:'30 días'},{v:'all',l:'Todo'}].map(({v,l})=>(
+          <button key={v} onClick={()=>setRange(v)} style={{flex:1,padding:'8px 0',border:`1px solid ${range===v?T.navy:T.border}`,borderRadius:8,background:range===v?T.navy:T.white,color:range===v?T.white:T.text3,fontSize:13,fontWeight:range===v?700:400}}>{l}</button>
+        ))}
+      </div>
+      {days.length===0&&<div style={{textAlign:'center',padding:'32px',color:T.text3,fontSize:13}}>Sin registros en este período.</div>}
+      {days.map(([dateStr,recs])=>{
+        const sorted=recs.sort((a,b)=>a.ts-b.ts);
+        const ms=calcDayMs(emp.id,recs,dateStr);
+        return(
+          <div key={dateStr} style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:12,marginBottom:10,overflow:'hidden'}}>
+            <div style={{background:'#f8f9fb',borderBottom:`1px solid ${T.border}`,padding:'10px 14px',display:'flex',justifyContent:'space-between'}}>
+              <span style={{fontWeight:700,fontSize:13,color:T.text,textTransform:'capitalize'}}>{fmtDateShort(new Date(dateStr).getTime()+43200000)}</span>
+              <span style={{fontSize:13,fontWeight:700,color:T.navy}}>{fmtMs(ms)}</span>
+            </div>
+            <div style={{padding:'6px 14px 2px'}}>
+              {sorted.map((r,i)=>{
+                const isE=r.type==='entrada';const next=sorted[i+1];const isPause=!isE&&next&&next.type==='entrada';
+                return(
+                  <div key={r.id}>
+                    <div style={{display:'flex',alignItems:'center',gap:10,padding:'5px 0'}}>
+                      <span style={{fontSize:12,color:isE?T.green:T.text3,fontWeight:600,width:50}}>{isE?'Entrada':'Salida'}</span>
+                      <span style={{flex:1,fontSize:13,fontFamily:'monospace',color:T.text}}>{fmtTime(r.ts)}</span>
+                    </div>
+                    {isPause&&<div style={{fontSize:11,color:T.text3,padding:'2px 0 2px 0',borderLeft:`2px dashed ${T.grayBd}`,paddingLeft:10,margin:'2px 0 2px 20px'}}>pausa {fmtMs(next.ts-r.ts)}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function EmpExtra({emp,myOvt,myLic,showToast,cfg}){
+  const [showForm,setShowForm]=useState(false);
+  const [form,setForm]=useState({fecha:todayISO(),horas:'1',motivo:'',tipo:'compensado'});
+  const balance=myOvt.filter(o=>o.status==='aprobado'&&(o.tipo==='compensado'||o.tipo==='proyecto')).reduce((s,o)=>s+o.horas,0);
+  const deuda=myLic.filter(l=>l.tipo==='Retiro anticipado'&&l.status==='aprobado').reduce((s,l)=>s+(l.horas||0),0);
+  const recuperado=myOvt.filter(o=>o.tipo==='recupero'&&o.status==='aprobado').reduce((s,o)=>s+o.horas,0);
+  const pendienteRecupero=Math.max(0,deuda-recuperado);
+
+  const sendEmail=(req)=>{
+    const eid=cfg?.emailjsPublicKey;
+    const sid=cfg?.emailjsServiceId;
+    const tid=cfg?.emailjsTemplateId;
+    const to=cfg?.directorEmail;
+    if(!eid||!sid||!tid||!to)return;
+    try{
+      emailjs.init(eid);
+      emailjs.send(sid,tid,{
+        to_email:to,
+        employee_name:emp.nombre,
+        employee_rol:emp.rol,
+        hours:String(req.horas),
+        date:fmtDate(new Date(req.fecha).getTime()+43200000),
+        reason:req.motivo,
+        type:req.tipo==='compensado'?'Franco / Tiempo libre':'Proyecto / Acuerdo especial',
+      }).then(()=>console.log('Email sent')).catch(e=>console.warn('EmailJS:',e));
+    }catch(e){console.warn('EmailJS error:',e);}
+  };
+
+  const submit=()=>{
+    if(!form.motivo.trim()){showToast('Completá el motivo',false);return;}
+    const req={id:uid(),empId:emp.id,fecha:form.fecha,horas:parseFloat(form.horas),motivo:form.motivo.trim(),tipo:form.tipo,status:'pendiente',createdAt:nowTs()};
+    ops.addOvt(req);
+    sendEmail(req);
+    showToast('Solicitud enviada. Pendiente de aprobación.');
+    setShowForm(false);setForm({fecha:todayISO(),horas:'1',motivo:'',tipo:'compensado'});
+  };
+
+  const STATUS={pendiente:{col:T.amber,bg:T.amberBg,bd:T.amberBd,label:'Pendiente'},aprobado:{col:T.green,bg:T.greenBg,bd:T.greenBd,label:'Aprobado'},rechazado:{col:T.red,bg:T.redBg,bd:T.redBd,label:'Rechazado'}};
+
+  return(
+    <div style={{padding:16}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+        <div style={{fontSize:15,fontWeight:700,color:T.navy}}>Horas Extra</div>
+        <button onClick={()=>setShowForm(v=>!v)} style={{padding:'8px 14px',background:T.navy,color:T.white,border:'none',borderRadius:8,fontSize:13,fontWeight:600}}>+ Solicitar</button>
+      </div>
+      {pendienteRecupero>0&&<div style={{background:T.redBg,border:`1px solid ${T.redBd}`,borderRadius:10,padding:14,marginBottom:10,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div><div style={{fontSize:11,fontWeight:700,color:T.red,letterSpacing:.5}}>HORAS A RECUPERAR</div><div style={{fontSize:12,color:T.text3,marginTop:2}}>Por retiros anticipados aprobados</div></div>
+        <div style={{fontSize:22,fontWeight:700,color:T.red}}>{pendienteRecupero}h</div>
+      </div>}
+      {balance>0&&<div style={{background:T.purpleBg,border:`1px solid ${T.purpleBd}`,borderRadius:10,padding:14,marginBottom:12,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div><div style={{fontSize:11,fontWeight:700,color:T.purple,letterSpacing:.5}}>SALDO COMPENSADO</div><div style={{fontSize:12,color:T.text3,marginTop:2}}>Aprobado por director</div></div>
+        <div style={{fontSize:22,fontWeight:700,color:T.purple}}>{balance}h</div>
+      </div>}
+      {showForm&&(
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:12,padding:14,marginBottom:14,animation:'slideUp .15s ease'}}>
+          <div style={{fontSize:13,fontWeight:700,color:T.navy,marginBottom:10}}>Nueva solicitud</div>
+          <Lbl>FECHA</Lbl><input type="date" value={form.fecha} onChange={e=>setForm({...form,fecha:e.target.value})} style={{...sty.input,marginBottom:10}}/>
+          <Lbl>HORAS</Lbl>
+          <div style={{display:'flex',gap:6,marginBottom:10}}>
+            {['0.5','1','1.5','2','3','4'].map(h=><button key={h} onClick={()=>setForm({...form,horas:h})} style={{flex:1,padding:'8px 0',borderRadius:8,border:`1px solid ${form.horas===h?T.navy:T.border}`,background:form.horas===h?T.navy:T.white,color:form.horas===h?T.white:T.text,fontSize:13,fontWeight:form.horas===h?700:400}}>{h}h</button>)}
+          </div>
+          <Lbl>TIPO</Lbl>
+          <div style={{display:'flex',gap:8,marginBottom:10}}>
+            {[{v:'compensado',l:'🔄 Franco / Tiempo libre'},{v:'proyecto',l:'📋 Proyecto / Acuerdo especial'},{v:'recupero',l:'⏱ Recupero de horas'}].map(({v,l})=><button key={v} onClick={()=>setForm({...form,tipo:v})} style={{flex:1,padding:'9px 6px',borderRadius:8,border:`2px solid ${form.tipo===v?T.navy:T.border}`,background:form.tipo===v?T.navy:T.white,color:form.tipo===v?T.white:T.text,fontSize:11,fontWeight:form.tipo===v?700:400,textAlign:'center'}}>{l}</button>)}
+          </div>
+          <Lbl>MOTIVO</Lbl>
+          <textarea value={form.motivo} onChange={e=>setForm({...form,motivo:e.target.value})} placeholder="Describí brevemente…" rows={3} style={{...sty.input,resize:'vertical'}}/>
+          <div style={{display:'flex',gap:8,marginTop:8}}>
+            <button onClick={()=>setShowForm(false)} style={{padding:'11px 14px',background:T.white,border:`1px solid ${T.border}`,borderRadius:8,color:T.text3,fontSize:13}}>Cancelar</button>
+            <button onClick={submit} style={{flex:1,padding:11,background:T.navy,color:T.white,border:'none',borderRadius:8,fontWeight:700,fontSize:14}}>Enviar</button>
+          </div>
+        </div>
+      )}
+      {myOvt.length===0&&!showForm&&<div style={{textAlign:'center',padding:'32px',color:T.text3,fontSize:13}}>Sin solicitudes todavía.</div>}
+      {myOvt.map(o=>{const s=STATUS[o.status]||STATUS.pendiente;return(
+        <div key={o.id} style={{background:T.white,border:`1px solid ${s.bd}`,borderRadius:10,padding:14,marginBottom:8}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
+            <div><div style={{fontWeight:700,fontSize:14,color:T.text}}>{o.horas}h · {fmtDate(new Date(o.fecha).getTime()+43200000)}</div><div style={{fontSize:12,color:T.text3,marginTop:2}}>{o.tipo==='compensado'?'Franco / Tiempo libre':'Proyecto / Acuerdo especial'}</div></div>
+            <span style={{padding:'3px 10px',borderRadius:12,background:s.bg,color:s.col,fontSize:11,fontWeight:700,border:`1px solid ${s.bd}`,whiteSpace:'nowrap'}}>{s.label}</span>
+          </div>
+          <div style={{fontSize:12,color:T.text2,fontStyle:'italic',borderLeft:`3px solid ${s.bd}`,paddingLeft:8}}>{o.motivo}</div>
+          {o.note&&<div style={{marginTop:6,fontSize:11,color:T.text3}}>Director: {o.note}</div>}
+        </div>
+      );})}
+    </div>
+  );
+}
+
+function EmpSettings({emp,showToast}){
+  const [cur,setCur]=useState('');const [n1,setN1]=useState('');const [n2,setN2]=useState('');
+  const co=CO[emp.company]||{};
+  const save=()=>{
+    if(cur!==emp.pin){showToast('PIN actual incorrecto',false);return;}
+    if(n1.length<4){showToast('Mínimo 4 dígitos',false);return;}
+    if(n1!==n2){showToast('Los PINs no coinciden',false);return;}
+    ops.updateEmp(emp.id,{pin:n1});
+    showToast('PIN actualizado ✓');setCur('');setN1('');setN2('');
+  };
+  return(
+    <div style={{padding:16}}>
+      <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:12,padding:16,marginBottom:12}}>
+        <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:14,paddingBottom:14,borderBottom:`1px solid ${T.border}`}}>
+          <div style={{width:48,height:48,borderRadius:'50%',background:co.color||T.navy,display:'flex',alignItems:'center',justifyContent:'center',fontSize:19,fontWeight:700,color:T.white}}>{emp.nombre.charAt(0)}</div>
+          <div><div style={{fontWeight:700,fontSize:15,color:T.text}}>{emp.nombre}</div><div style={{fontSize:12,color:T.text3}}>{emp.rol} · {co.name}</div></div>
+        </div>
+        <div style={{fontSize:13,fontWeight:700,color:T.navy,marginBottom:10}}>Cambiar mi PIN</div>
+        {[{l:'PIN actual',v:cur,s:setCur},{l:'PIN nuevo (mín. 4)',v:n1,s:setN1},{l:'Repetir PIN nuevo',v:n2,s:setN2}].map(({l,v,s})=>(
+          <div key={l} style={{marginBottom:10}}>
+            <div style={{fontSize:11,fontWeight:700,color:T.text3,marginBottom:4}}>{l.toUpperCase()}</div>
+            <input type="password" inputMode="numeric" maxLength={8} value={v} onChange={e=>s(e.target.value.replace(/\D/,''))} style={{...sty.input,letterSpacing:6,fontSize:20}}/>
+          </div>
+        ))}
+        <button onClick={save} style={{width:'100%',padding:12,background:T.navy,color:T.white,border:'none',borderRadius:9,fontWeight:700,fontSize:14,marginTop:4}}>Actualizar PIN</button>
+      </div>
+      <div style={{padding:12,background:'#fffbeb',border:'1px solid #fde68a',borderRadius:9,fontSize:12,color:'#92400e'}}>⚠ Tu PIN es personal. No lo compartas.</div>
+    </div>
+  );
+}
+
+/* ══ CONFIRM OVERLAY ══════════════════════════════════════ */
+function ConfirmOverlay({type,onConfirm,onCancel}){
+  const isIn=type==='entrada';const col=isIn?T.green:T.red;
+  const timerRef=useRef();
+  useEffect(()=>{timerRef.current=setTimeout(onConfirm,4000);return()=>clearTimeout(timerRef.current);},[]);
+  return(
+    <div style={{position:'fixed',inset:0,background:'rgba(10,18,30,.78)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:8000,animation:'fadeIn .15s',padding:20}}>
+      <div style={{background:T.white,borderRadius:18,padding:28,width:'100%',maxWidth:320,animation:'scaleIn .18s',textAlign:'center',boxShadow:'0 8px 40px rgba(0,0,0,.3)'}}>
+        <div style={{fontSize:48,marginBottom:12}}>{isIn?'→':'↑'}</div>
+        <div style={{fontSize:22,fontWeight:700,color:col,marginBottom:16}}>{isIn?'ENTRADA':'SALIDA'} · {fmtTime(nowTs())}</div>
+        <div style={{height:3,background:'#f0f0f0',borderRadius:2,marginBottom:20,overflow:'hidden'}}>
+          <div style={{height:'100%',background:col,borderRadius:2,animation:'progress 4s linear forwards'}}/>
+        </div>
+        <div style={{display:'flex',gap:8}}>
+          <button onClick={onCancel} style={{flex:1,padding:13,border:`1px solid ${T.border}`,borderRadius:10,background:T.white,color:T.text3,fontWeight:600,fontSize:14}}>Cancelar</button>
+          <button onClick={onConfirm} style={{flex:2,padding:13,border:'none',borderRadius:10,background:col,color:T.white,fontWeight:700,fontSize:14}}>Confirmar →</button>
+        </div>
+        <div style={{marginTop:10,fontSize:11,color:'#c0c4cc'}}>Se confirma automáticamente en 4s</div>
+      </div>
+    </div>
+  );
+}
+
+/* ══ DIRECTOR VIEW ════════════════════════════════════════ */
+function DirectorView({employees,records,overtime,licenses,cfg,getStatus,onLogout,showToast}){
+  const [tab,setTab]=useState('dashboard');
+  const pendingOvt=overtime.filter(o=>o.status==='pendiente').length;
+  const pendingLic=licenses.filter(l=>l.status==='pendiente').length;
+  const pending=pendingOvt+pendingLic;
+  const TABS=[{id:'dashboard',label:'Resumen',Icon:IcoDash},{id:'overtime',label:'Extras',Icon:IcoClock2},{id:'licencias',label:'Licencias',Icon:IcoCalendar},{id:'history',label:'Historial',Icon:IcoList},{id:'team',label:'Equipo',Icon:IcoPeople},{id:'settings',label:'Config.',Icon:IcoSettings}];
+  return(
+    <div style={{maxWidth:560,margin:'0 auto',minHeight:'100vh',display:'flex',flexDirection:'column',background:T.white}}>
+      <div style={{background:'#1a1a2e',flexShrink:0}}>
+        <div style={{padding:'14px 16px 12px',display:'flex',alignItems:'center',gap:10}}>
+          <span style={{fontSize:16}}>🔑</span>
+          <div>
+            <div style={{color:T.white,fontSize:14,fontWeight:700}}>Panel Director</div>
+            <div style={{color:'rgba(255,255,255,0.4)',fontSize:11}}>Tiempo real · {employees.length} personas</div>
+          </div>
+          <button onClick={onLogout} style={{marginLeft:'auto',background:'rgba(255,255,255,0.08)',border:'none',color:'rgba(255,255,255,0.5)',borderRadius:8,padding:'7px 12px',fontSize:12}}>Salir</button>
+        </div>
+      </div>
+      <main style={{flex:1,overflowY:'auto'}}>
+        {tab==='dashboard'&&<DirDashboard employees={employees} records={records} overtime={overtime} licenses={licenses} getStatus={getStatus}/>}
+        {tab==='overtime'&&<DirOvertime employees={employees} overtime={overtime} cfg={cfg} showToast={showToast}/>}
+        {tab==='licencias'&&<DirLicencias employees={employees} licenses={licenses} cfg={cfg} showToast={showToast}/>}
+        {tab==='history'&&<DirHistory employees={employees} records={records} overtime={overtime} licenses={licenses}/>}
+        {tab==='team'&&<DirTeam employees={employees} showToast={showToast}/>}
+        {tab==='settings'&&<DirSettings cfg={cfg} showToast={showToast}/>}
+      </main>
+      <nav style={{background:T.white,borderTop:`1px solid ${T.border}`,display:'flex',flexShrink:0}}>
+        {TABS.map(({id,label,Icon})=>{
+          const active=tab===id;const badge=(id==='overtime'&&pendingOvt)||(id==='licencias'&&pendingLic);
+          return(
+            <button key={id} onClick={()=>setTab(id)} style={{flex:1,padding:'9px 2px 10px',border:'none',background:'transparent',color:active?'#1a1a2e':T.text3,borderTop:`2px solid ${active?'#1a1a2e':'transparent'}`,fontSize:8.5,fontWeight:active?700:400,letterSpacing:.3,display:'flex',flexDirection:'column',alignItems:'center',gap:3,position:'relative'}}>
+              <Icon/>{label.toUpperCase()}
+              {badge>0&&<span style={{position:'absolute',top:5,right:'50%',marginRight:-16,width:15,height:15,borderRadius:'50%',background:T.red,color:T.white,fontSize:8,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center'}}>{badge}</span>}
+            </button>
+          );
+        })}
+      </nav>
+    </div>
+  );
+}
+
+function DirDashboard({employees,records,overtime,licenses,getStatus}){
+  const today=todayStr();
+  const todayRecs=records.filter(r=>new Date(r.ts).toDateString()===today);
+  const inside=employees.filter(e=>getStatus(e.id)==='adentro');
+  const pendingOvt=overtime.filter(o=>o.status==='pendiente').length;
+  const pendingLic=licenses.filter(l=>l.status==='pendiente').length;
+  const pending=pendingOvt+pendingLic;
+  return(
+    <div style={{padding:14}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:7,marginBottom:14}}>
+        {[{l:'Total',v:employees.length,c:'#1a1a2e'},{l:'Adentro',v:inside.length,c:T.green},{l:'Movim. hoy',v:todayRecs.length,c:T.amber},{l:'Extras pend.',v:pending,c:pending?T.red:T.text3}]
+          .map(s=><div key={s.l} style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:10,padding:'12px 6px',textAlign:'center'}}><div style={{fontSize:22,fontWeight:700,color:s.c}}>{s.v}</div><div style={{fontSize:9,color:T.text3,marginTop:2}}>{s.l}</div></div>)}
+      </div>
+      {Object.entries(CO).map(([key,co])=>{
+        const emps=employees.filter(e=>e.company===key);
+        const ins=emps.filter(e=>getStatus(e.id)==='adentro');
+        const out=emps.filter(e=>getStatus(e.id)!=='adentro');
+        return(
+          <div key={key} style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:12,marginBottom:12,overflow:'hidden'}}>
+            <div style={{background:co.color,padding:'10px 14px',display:'flex',justifyContent:'space-between'}}>
+              <span style={{color:T.white,fontSize:13,fontWeight:700}}>{co.name}</span>
+              <span style={{color:'rgba(255,255,255,0.7)',fontSize:12}}>{ins.length}/{emps.length} adentro</span>
+            </div>
+            <div style={{padding:'6px 0'}}>
+              {ins.map((e,i)=>(
+                <div key={e.id} style={{display:'flex',justifyContent:'space-between',padding:'7px 14px',borderBottom:`1px solid ${T.grayBg}`,alignItems:'center'}}>
+                  <div><span style={{fontWeight:600,fontSize:13,color:T.text}}>{e.nombre}</span><span style={{fontSize:11,color:T.text3,marginLeft:6}}>{e.rol}</span></div>
+                  <div style={{textAlign:'right'}}><div style={{fontSize:12,fontWeight:700,color:T.green}}>● adentro</div><div style={{fontSize:11,color:T.text3}}>{fmtMs(calcDayMs(e.id,records,today))}</div></div>
+                </div>
+              ))}
+              {out.map((e,i)=>(
+                <div key={e.id} style={{display:'flex',justifyContent:'space-between',padding:'7px 14px',borderBottom:i<out.length-1?`1px solid ${T.grayBg}`:'none',alignItems:'center'}}>
+                  <div><span style={{fontSize:13,color:T.text3}}>{e.nombre}</span><span style={{fontSize:11,color:'#9ca3af',marginLeft:6}}>{e.rol}</span></div>
+                  <span style={{fontSize:11,color:'#d1d5db'}}>{fmtMs(calcDayMs(e.id,records,today))||'—'}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DirOvertime({employees,overtime,cfg,showToast}){
+  const [note,setNote]=useState({});
+  const getName=id=>employees.find(e=>e.id===id)?.nombre||'?';
+  const getCo=id=>CO[employees.find(e=>e.id===id)?.company]||{};
+  const pending=overtime.filter(o=>o.status==='pendiente');
+  const rest=overtime.filter(o=>o.status!=='pendiente').sort((a,b)=>b.createdAt-a.createdAt);
+  const balance={};overtime.filter(o=>o.status==='aprobado'&&(o.tipo==='compensado'||o.tipo==='proyecto')).forEach(o=>{balance[o.empId]=(balance[o.empId]||0)+o.horas;});
+
+  const approve=id=>{const o=overtime.find(x=>x.id===id);ops.updateOvt(id,{status:'aprobado',approvedAt:nowTs(),note:note[id]||''});showToast('Aprobado ✓');const emp=employees.find(e=>e.id===o?.empId);sendEmailToEmp(cfg,emp,'Tu solicitud de horas extra fue APROBADA','Solicitud: '+o?.horas+'h - '+(o?.tipo==='compensado'?'Franco':'Proyecto')+'. Nota: '+(note[id]||'Sin nota'));};
+  const reject=id=>{const o=overtime.find(x=>x.id===id);ops.updateOvt(id,{status:'rechazado',approvedAt:nowTs(),note:note[id]||''});showToast('Rechazado');const emp=employees.find(e=>e.id===o?.empId);sendEmailToEmp(cfg,emp,'Tu solicitud de horas extra fue RECHAZADA','Solicitud: '+o?.horas+'h. Nota del director: '+(note[id]||'Sin nota'));};
+
+  return(
+    <div style={{padding:14}}>
+      <div style={{fontSize:15,fontWeight:700,color:T.navy,marginBottom:12}}>Horas Extra</div>
+      {pending.length===0?<div style={{background:T.greenBg,border:`1px solid ${T.greenBd}`,borderRadius:10,padding:14,textAlign:'center',marginBottom:12}}><div style={{fontSize:20,marginBottom:6}}>✓</div><div style={{fontSize:13,color:T.green,fontWeight:600}}>Sin pendientes</div></div>:(
+        <>
+          <div style={{fontSize:11,fontWeight:700,color:T.amber,letterSpacing:.6,marginBottom:8}}>PENDIENTES ({pending.length})</div>
+          {pending.map(o=>{const co=getCo(o.empId);return(
+            <div key={o.id} style={{background:T.white,border:`2px solid ${T.amberBd}`,borderRadius:12,padding:14,marginBottom:10}}>
+              <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
+                <div><div style={{fontWeight:700,fontSize:14,color:T.text}}>{getName(o.empId)}</div><div style={{fontSize:11,color:T.text3}}>{fmtDate(new Date(o.fecha).getTime()+43200000)} · {o.tipo}</div></div>
+                <div style={{textAlign:'right'}}><div style={{fontSize:20,fontWeight:700,color:T.navy}}>{o.horas}h</div><span style={{fontSize:9,fontWeight:700,padding:'1px 5px',borderRadius:4,background:co.bg||'#eee',color:co.color||T.text3}}>{co.badge}</span></div>
+              </div>
+              <div style={{fontSize:12,color:T.text2,fontStyle:'italic',background:T.amberBg,borderRadius:7,padding:'8px 10px',marginBottom:10}}>"{o.motivo}"</div>
+              <input placeholder="Nota opcional" value={note[o.id]||''} onChange={e=>setNote(p=>({...p,[o.id]:e.target.value}))} style={{...sty.input,marginBottom:8,fontSize:13}}/>
+              <div style={{display:'flex',gap:8}}>
+                <button onClick={()=>reject(o.id)} style={{flex:1,padding:10,background:T.redBg,color:T.red,border:`1px solid ${T.redBd}`,borderRadius:8,fontWeight:700,fontSize:13}}>✕ Rechazar</button>
+                <button onClick={()=>approve(o.id)} style={{flex:2,padding:10,background:T.green,color:T.white,border:'none',borderRadius:8,fontWeight:700,fontSize:13}}>✓ Aprobar {o.horas}h</button>
+              </div>
+            </div>
+          );})}
+        </>
+      )}
+      {Object.keys(balance).length>0&&(
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:10,padding:14,marginBottom:12}}>
+          <div style={{fontSize:11,fontWeight:700,color:T.purple,letterSpacing:.6,marginBottom:8}}>SALDOS COMPENSADOS</div>
+          {Object.entries(balance).map(([empId,h],i,arr)=>(
+            <div key={empId} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:i<arr.length-1?`1px solid ${T.grayBg}`:'none'}}>
+              <span style={{fontSize:13,color:T.text}}>{getName(empId)}</span><span style={{fontSize:13,fontWeight:700,color:T.purple}}>{h}h</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {rest.length>0&&(
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:10,overflow:'hidden'}}>
+          <div style={{padding:'10px 14px',background:'#f8f9fb',borderBottom:`1px solid ${T.border}`,fontSize:11,fontWeight:700,color:T.text3,letterSpacing:.6}}>HISTORIAL</div>
+          {rest.slice(0,10).map((o,i,arr)=>{
+            const s={aprobado:{c:T.green,l:'Aprobado'},rechazado:{c:T.red,l:'Rechazado'}}[o.status]||{};
+            return<div key={o.id} style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',borderBottom:i<arr.length-1?`1px solid ${T.grayBg}`:'none',alignItems:'center'}}>
+              <div><div style={{fontSize:13,fontWeight:600,color:T.text}}>{getName(o.empId)} · {o.horas}h</div><div style={{fontSize:11,color:T.text3}}>{fmtDate(new Date(o.fecha).getTime()+43200000)}</div></div>
+              <span style={{fontSize:11,fontWeight:700,color:s.c}}>{s.l}</span>
+            </div>;
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DirHistory({employees,records,overtime,licenses}){
+  const [empF,setEmpF]=useState('all');
+  const [dateF,setDateF]=useState('month');
+  const [coF,setCoF]=useState('all');
+  const [section,setSection]=useState('all');
+
+  const dr=useMemo(()=>{
+    const d=new Date();
+    if(dateF==='today')return[new Date(d.toDateString()),new Date(d.toDateString()+' 23:59:59')];
+    if(dateF==='week'){const s=new Date(d);s.setDate(s.getDate()-6);s.setHours(0,0,0,0);return[s,new Date()];}
+    if(dateF==='month'){const s=new Date(d);s.setDate(s.getDate()-29);s.setHours(0,0,0,0);return[s,new Date()];}
+    if(dateF==='prevmonth'){const s=new Date(d);s.setDate(1);s.setMonth(s.getMonth()-1);s.setHours(0,0,0,0);const e=new Date(s.getFullYear(),s.getMonth()+1,0,23,59,59);return[s,e];}
+    return[new Date(0),new Date()];
+  },[dateF]);
+
+  const inRange=(ts)=>{const d=new Date(ts);return d>=dr[0]&&d<=dr[1];};
+  const matchEmp=(id)=>empF==='all'||id===empF;
+  const matchCo=(id)=>{if(coF==='all')return true;return employees.find(e=>e.id===id)?.company===coF;};
+
+  const fRecs=useMemo(()=>records.filter(r=>matchEmp(r.empId)&&matchCo(r.empId)&&inRange(r.ts)).sort((a,b)=>b.ts-a.ts),[records,empF,coF,dr]);
+  const fOvt=useMemo(()=>(overtime||[]).filter(o=>matchEmp(o.empId)&&matchCo(o.empId)).sort((a,b)=>b.createdAt-a.createdAt),[overtime,empF,coF]);
+  const fLic=useMemo(()=>(licenses||[]).filter(l=>matchEmp(l.empId)&&matchCo(l.empId)).sort((a,b)=>b.createdAt-a.createdAt),[licenses,empF,coF]);
+
+  const gName=id=>employees.find(e=>e.id===id)?.nombre||'?';
+  const gCo=id=>CO[employees.find(e=>e.id===id)?.company]?.name||'?';
+  const gArea=id=>employees.find(e=>e.id===id)?.rol||'?';
+  const q=v=>'"'+String(v||'').replace(/"/g,"'")+'"';
+  const SEP=';';
+
+  const exportCSV=()=>{
+    const BOM='\uFEFF';
+    const h1=['Empresa','Empleado','Area','Tipo','Movimiento','Fecha','Hora'].join(SEP);
+    const r1=fRecs.map(r=>[gCo(r.empId),gName(r.empId),gArea(r.empId),'Fichaje',r.type==='entrada'?'Entrada':'Salida',fmtDate(r.ts),fmtTime(r.ts)].map(q).join(SEP));
+    const h2=['Empresa','Empleado','Area','Tipo','Subtipo','Estado','Fecha_Solicitud','Fecha_Extra','Horas','Motivo','Nota_Director','Fecha_Resolucion'].join(SEP);
+    const r2=(overtime||[]).filter(o=>matchEmp(o.empId)&&matchCo(o.empId)).map(o=>[gCo(o.empId),gName(o.empId),gArea(o.empId),'Hora Extra',o.tipo==='compensado'?'Franco / Tiempo libre':'Proyecto / Acuerdo especial',o.status==='aprobado'?'Aprobado':o.status==='rechazado'?'Rechazado':'Pendiente',fmtDate(o.createdAt),fmtDate(new Date(o.fecha).getTime()+43200000),o.horas,o.motivo||'',o.note||'',o.approvedAt?fmtDate(o.approvedAt):''].map(q).join(SEP));
+    const h3=['Empresa','Empleado','Area','Tipo','Tipo_Licencia','Estado','Fecha_Solicitud','Fecha_Desde','Fecha_Hasta','Dias','Motivo','Nota_Director','Fecha_Resolucion'].join(SEP);
+    const r3=(licenses||[]).filter(l=>matchEmp(l.empId)&&matchCo(l.empId)).map(l=>[gCo(l.empId),gName(l.empId),gArea(l.empId),'Licencia',l.tipo||'',l.status==='aprobado'?'Aprobado':l.status==='rechazado'?'Rechazado':'Pendiente',fmtDate(l.createdAt),fmtDate(new Date(l.fechaDesde).getTime()+43200000),fmtDate(new Date(l.fechaHasta).getTime()+43200000),l.dias,l.motivo||'',l.note||'',l.approvedAt?fmtDate(l.approvedAt):''].map(q).join(SEP));
+    const rows=['"=== FICHAJES ==="',h1,...r1,'','"=== HORAS EXTRA ==="',h2,...r2,'','"=== LICENCIAS ==="',h3,...r3];
+    const a=document.createElement('a');
+    a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(BOM+rows.join('\r\n'));
+    a.download='personal_'+new Date().toISOString().slice(0,10)+'.csv';
+    a.click();
+  };
+
+  const sStatus=(st)=>st==='aprobado'?{c:T.green,l:'Aprobado'}:st==='rechazado'?{c:T.red,l:'Rechazado'}:{c:T.amber,l:'Pendiente'};
+
+  return(
+    <div style={{padding:14}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+        <div style={{fontSize:15,fontWeight:700,color:T.navy}}>Historial</div>
+        <button onClick={exportCSV} style={{background:T.green,color:T.white,border:'none',borderRadius:8,padding:'8px 14px',fontSize:12,fontWeight:700}}>
+          {'↓'} CSV completo
+        </button>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:7,marginBottom:12}}>
+        {[{l:'Fichajes',v:fRecs.length,c:T.navy},{l:'H. Extra',v:(overtime||[]).length,c:T.amber},{l:'Licencias',v:(licenses||[]).length,c:T.purple}].map(s=>(
+          <div key={s.l} style={{background:T.white,border:'1px solid '+T.border,borderRadius:10,padding:'11px 8px',textAlign:'center'}}>
+            <div style={{fontSize:22,fontWeight:700,color:s.c}}>{s.v}</div>
+            <div style={{fontSize:10,color:T.text3,marginTop:2}}>{s.l}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:'flex',gap:6,marginBottom:8,flexWrap:'wrap'}}>
+        <select value={dateF} onChange={e=>setDateF(e.target.value)} style={sty.sel}>
+          <option value="today">Hoy</option><option value="week">Semana</option>
+          <option value="month">Ultimo mes</option><option value="prevmonth">Mes anterior</option>
+          <option value="all">Todo</option>
+        </select>
+        <select value={coF} onChange={e=>setCoF(e.target.value)} style={sty.sel}>
+          <option value="all">Todas</option><option value="carrello">Carrello</option><option value="pronti">Pronti</option>
+        </select>
+        <select value={empF} onChange={e=>setEmpF(e.target.value)} style={{...sty.sel,flex:2}}>
+          <option value="all">Todos</option>
+          {employees.map(e=><option key={e.id} value={e.id}>{e.nombre}</option>)}
+        </select>
+      </div>
+      <div style={{display:'flex',gap:5,marginBottom:12}}>
+        {['all','fichajes','extras','licencias'].map(v=>(
+          <button key={v} onClick={()=>setSection(v)} style={{flex:1,padding:'7px 0',border:'1px solid '+(section===v?T.navy:T.border),borderRadius:7,background:section===v?T.navy:T.white,color:section===v?T.white:T.text3,fontSize:11,fontWeight:section===v?700:400}}>
+            {v==='all'?'Todo':v==='fichajes'?'Fichajes':v==='extras'?'H.Extra':'Licencias'}
+          </button>
+        ))}
+      </div>
+
+      {(section==='all'||section==='fichajes')&&(
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.text3,letterSpacing:1,marginBottom:8}}>FICHAJES ({fRecs.length})</div>
+          <div style={{background:T.white,border:'1px solid '+T.border,borderRadius:10,overflow:'hidden'}}>
+            {fRecs.length===0?<div style={{padding:20,textAlign:'center',color:T.text3,fontSize:13}}>Sin fichajes.</div>:
+              fRecs.slice(0,15).map((r,i,arr)=>{
+                const emp=employees.find(e=>e.id===r.empId);const co=CO[emp?.company]||{};const isIn=r.type==='entrada';
+                return<div key={r.id} style={{display:'flex',alignItems:'center',padding:'9px 13px',borderBottom:i<arr.length-1?'1px solid '+T.grayBg:'none'}}>
+                  <div style={{width:24,height:24,borderRadius:'50%',background:isIn?T.greenBg:'#F3F4F6',color:isIn?T.green:T.text3,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:700,flexShrink:0,marginRight:9}}>{isIn?'->':'<-'}</div>
+                  <div style={{flex:1}}><div style={{fontWeight:600,fontSize:13,color:T.text}}>{gName(r.empId)}</div><div style={{fontSize:10,color:T.text3}}>{fmtDate(r.ts)}</div></div>
+                  <div style={{textAlign:'right'}}><div style={{fontSize:12,fontWeight:700,color:isIn?T.green:T.text3}}>{isIn?'Entrada':'Salida'}</div><div style={{fontSize:11,color:T.text}}>{fmtTime(r.ts)}</div><SchFlag emp={employees.find(e=>e.id===r.empId)} rec={r}/>{r.geo?<div style={{fontSize:10,color:T.teal}}>📍 {r.geo.lat.toFixed(3)},{r.geo.lng.toFixed(3)}</div>:null}</div>
+                </div>;
+              })
+            }
+            {fRecs.length>15&&<div style={{padding:'8px',textAlign:'center',fontSize:12,color:T.text3}}>+{fRecs.length-15} mas en CSV</div>}
+          </div>
+        </div>
+      )}
+
+      {(section==='all'||section==='extras')&&fOvt.length>0&&(
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.text3,letterSpacing:1,marginBottom:8}}>HORAS EXTRA ({fOvt.length})</div>
+          <div style={{background:T.white,border:'1px solid '+T.border,borderRadius:10,overflow:'hidden'}}>
+            {fOvt.map((o,i,arr)=>{
+              const s=sStatus(o.status);
+              return<div key={o.id} style={{padding:'10px 13px',borderBottom:i<arr.length-1?'1px solid '+T.grayBg:'none'}}>
+                <div style={{display:'flex',justifyContent:'space-between',marginBottom:3}}>
+                  <div><span style={{fontWeight:600,fontSize:13,color:T.text}}>{gName(o.empId)}</span><span style={{fontSize:11,color:T.text3,marginLeft:6}}>{o.horas}h · {fmtDate(new Date(o.fecha).getTime()+43200000)}</span></div>
+                  <span style={{fontSize:10,fontWeight:700,padding:'2px 8px',borderRadius:10,background:s.c+'22',color:s.c}}>{s.l}</span>
+                </div>
+                <div style={{fontSize:11,color:T.text2,fontStyle:'italic'}}>{o.motivo}</div>
+                {o.note&&<div style={{fontSize:11,color:T.text3}}>Director: {o.note}</div>}
+                <div style={{fontSize:10,color:T.text3,marginTop:2}}>Solicitado: {fmtDate(o.createdAt)}{o.approvedAt?' · Resuelto: '+fmtDate(o.approvedAt):''}</div>
+              </div>;
+            })}
+          </div>
+        </div>
+      )}
+
+      {(section==='all'||section==='licencias')&&fLic.length>0&&(
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.text3,letterSpacing:1,marginBottom:8}}>LICENCIAS ({fLic.length})</div>
+          <div style={{background:T.white,border:'1px solid '+T.border,borderRadius:10,overflow:'hidden'}}>
+            {fLic.map((l,i,arr)=>{
+              const s=sStatus(l.status);
+              return<div key={l.id} style={{padding:'10px 13px',borderBottom:i<arr.length-1?'1px solid '+T.grayBg:'none'}}>
+                <div style={{display:'flex',justifyContent:'space-between',marginBottom:3}}>
+                  <div><span style={{fontWeight:600,fontSize:13,color:T.text}}>{gName(l.empId)}</span><span style={{fontSize:11,color:T.text3,marginLeft:6}}>{l.tipo} · {l.dias}d</span></div>
+                  <span style={{fontSize:10,fontWeight:700,padding:'2px 8px',borderRadius:10,background:s.c+'22',color:s.c}}>{s.l}</span>
+                </div>
+                {l.motivo&&<div style={{fontSize:11,color:T.text2,fontStyle:'italic'}}>{l.motivo}</div>}
+                {l.note&&<div style={{fontSize:11,color:T.text3}}>Director: {l.note}</div>}
+                <div style={{fontSize:10,color:T.text3,marginTop:2}}>Solicitado: {fmtDate(l.createdAt)}{l.approvedAt?' · Resuelto: '+fmtDate(l.approvedAt):''}</div>
+              </div>;
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function DirTeam({employees,showToast}){
+  const [showForm,setShowForm]=useState(false);const [form,setForm]=useState({nombre:'',rol:'',company:'carrello',pin:'1234',email:'',horaEntrada:'09:00',horaSalida:'18:00'});const [editId,setEditId]=useState(null);
+  const ROLES=['Depósito','Compras','Ventas','Logística','Marketing','Administración','Diseño','CX','Ops & Full','Postventa','RRPP'];
+  const submit=()=>{
+    if(!form.nombre.trim())return;
+    if(editId)ops.updateEmp(editId,{nombre:form.nombre.trim(),rol:form.rol.trim()||'Sin rol',company:form.company,pin:form.pin||'1234',email:form.email.trim(),horaEntrada:form.horaEntrada||'09:00',horaSalida:form.horaSalida||'18:00'});
+    else ops.addEmp({id:uid(),nombre:form.nombre.trim(),rol:form.rol.trim()||'Sin rol',company:form.company,pin:form.pin||'1234',email:form.email.trim(),horaEntrada:form.horaEntrada||'09:00',horaSalida:form.horaSalida||'18:00'});
+    setForm({nombre:'',rol:'',company:'carrello',pin:'1234',email:'',horaEntrada:'09:00',horaSalida:'18:00'});setShowForm(false);setEditId(null);
+  };
+  const startEdit=emp=>{setForm({nombre:emp.nombre,rol:emp.rol,company:emp.company,pin:emp.pin||'1234',email:emp.email||'',horaEntrada:emp.horaEntrada||'09:00',horaSalida:emp.horaSalida||'18:00'});setEditId(emp.id);setShowForm(true);};
+  const del=id=>{if(window.confirm('¿Eliminar empleado?'))ops.deleteEmp(id);};
+  const cancel=()=>{setShowForm(false);setForm({nombre:'',rol:'',company:'carrello',pin:'1234',email:'',horaEntrada:'09:00',horaSalida:'18:00'});setEditId(null);};
+
+  return(
+    <div style={{padding:14}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+        <div style={{fontSize:15,fontWeight:700,color:T.navy}}>Equipo ({employees.length})</div>
+        <button onClick={()=>{cancel();setShowForm(true);}} style={{padding:'8px 14px',background:T.navy,color:T.white,border:'none',borderRadius:8,fontSize:13,fontWeight:600}}>+ Agregar</button>
+      </div>
+      {showForm&&(
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:12,padding:14,marginBottom:12,animation:'slideUp .15s ease'}}>
+          <div style={{fontSize:13,fontWeight:700,color:T.navy,marginBottom:10}}>{editId?'Editar':'Nuevo empleado'}</div>
+          <input placeholder="Nombre *" value={form.nombre} onChange={e=>setForm({...form,nombre:e.target.value})} autoFocus style={{...sty.input,marginBottom:8}}/>
+          <input placeholder="Rol / Área" value={form.rol} onChange={e=>setForm({...form,rol:e.target.value})} style={{...sty.input,marginBottom:6}}/>
+          <div style={{display:'flex',flexWrap:'wrap',gap:5,marginBottom:10}}>
+            {ROLES.map(r=><button key={r} onClick={()=>setForm({...form,rol:r})} style={{padding:'4px 9px',borderRadius:10,border:`1px solid ${form.rol===r?T.navy:T.border}`,background:form.rol===r?T.navy:T.white,color:form.rol===r?T.white:T.text3,fontSize:11}}>{r}</button>)}
+          </div>
+          <div style={{display:'flex',gap:8,marginBottom:10}}>
+            {Object.entries(CO).map(([k,co])=><button key={k} onClick={()=>setForm({...form,company:k})} style={{flex:1,padding:10,borderRadius:9,border:`2px solid ${form.company===k?co.color:T.border}`,background:form.company===k?co.color:T.white,color:form.company===k?T.white:T.text,fontWeight:form.company===k?700:400,fontSize:13}}>{co.name}</button>)}
+          </div>
+          <Lbl>PIN INICIAL</Lbl>
+          <input type="text" inputMode="numeric" maxLength={8} value={form.pin} onChange={e=>setForm({...form,pin:e.target.value.replace(/\D/,'')})} placeholder="PIN (mín. 4 dígitos)" style={{...sty.input,marginBottom:6,letterSpacing:4}}/>
+          <div style={{fontSize:11,color:T.text3,marginBottom:10}}>El empleado puede cambiarlo desde su perfil.</div>
+          <Lbl>EMAIL (para notificaciones)</Lbl>
+          <input type="email" placeholder="email@ejemplo.com" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} style={{...sty.input,marginBottom:10}}/>
+          <Lbl>HORARIO ASIGNADO</Lbl>
+          <div style={{display:'flex',gap:8,marginBottom:8}}>
+            <div style={{flex:1}}><div style={{fontSize:10,color:T.text3,marginBottom:3}}>Entrada</div><input type="time" value={form.horaEntrada} onChange={e=>setForm({...form,horaEntrada:e.target.value})} style={{...sty.input}}/></div>
+            <div style={{flex:1}}><div style={{fontSize:10,color:T.text3,marginBottom:3}}>Salida</div><input type="time" value={form.horaSalida} onChange={e=>setForm({...form,horaSalida:e.target.value})} style={{...sty.input}}/></div>
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={submit} style={{flex:1,padding:11,background:T.navy,color:T.white,border:'none',borderRadius:8,fontWeight:700,fontSize:14}}>{editId?'Guardar':'Agregar'}</button>
+            <button onClick={cancel} style={{padding:'11px 14px',background:T.white,border:`1px solid ${T.border}`,borderRadius:8,fontSize:14,color:T.text3}}>Cancelar</button>
+          </div>
+        </div>
+      )}
+      {Object.entries(CO).map(([key,co])=>{
+        const emps=employees.filter(e=>e.company===key);
+        if(emps.length===0)return null;
+        return(
+          <div key={key} style={{marginBottom:14}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}><div style={{width:6,height:6,borderRadius:'50%',background:co.color}}/><span style={{fontSize:11,fontWeight:700,color:co.color,letterSpacing:.8}}>{co.name.toUpperCase()} ({emps.length})</span></div>
+            {emps.map(emp=>(
+              <div key={emp.id} style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:10,padding:'11px 13px',display:'flex',alignItems:'center',gap:10,marginBottom:7}}>
+                <div style={{width:36,height:36,borderRadius:'50%',background:co.color,color:T.white,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14,fontWeight:700,flexShrink:0}}>{emp.nombre.charAt(0)}</div>
+                <div style={{flex:1,minWidth:0}}><div style={{fontWeight:600,fontSize:13,color:T.text}}>{emp.nombre}</div><div style={{fontSize:11,color:T.text3}}>{emp.rol} · PIN: {'•'.repeat(Math.max(emp.pin?.length||4,4))}</div><div style={{fontSize:10,color:T.text3}}>{emp.horaEntrada||'09:00'} – {emp.horaSalida||'18:00'}{emp.email?' · '+emp.email:''}</div></div>
+                <div style={{display:'flex',gap:6}}>
+                  <button onClick={()=>startEdit(emp)} style={{padding:'6px 10px',background:T.grayBg,color:T.navy,border:`1px solid ${T.border}`,borderRadius:7,fontSize:11,fontWeight:600}}>Editar</button>
+                  <button onClick={()=>del(emp.id)} style={{padding:'6px 9px',background:T.redBg,color:T.red,border:`1px solid ${T.redBd}`,borderRadius:7,fontSize:11}}>✕</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DirSettings({cfg,showToast}){
+  const [p1,setP1]=useState('');const [p2,setP2]=useState('');
+  const [email,setEmail]=useState(cfg?.directorEmail||'');
+  const [ejsKey,setEjsKey]=useState(cfg?.emailjsPublicKey||'');
+  const [ejsSid,setEjsSid]=useState(cfg?.emailjsServiceId||'');
+  const [ejsTid,setEjsTid]=useState(cfg?.emailjsTemplateId||'');
+  const emailConfigured=cfg?.directorEmail&&cfg?.emailjsPublicKey&&cfg?.emailjsServiceId&&cfg?.emailjsTemplateId;
+
+  const savePin=()=>{
+    if(p1.length<4){showToast('Mínimo 4 dígitos',false);return;}
+    if(p1!==p2){showToast('Los PINs no coinciden',false);return;}
+    ops.updateCfg({directorPin:p1});showToast('PIN actualizado ✓');setP1('');setP2('');
+  };
+  const saveEmail=()=>{
+    if(!email||!ejsKey||!ejsSid||!ejsTid){showToast('Completá todos los campos de email',false);return;}
+    ops.updateCfg({directorEmail:email,emailjsPublicKey:ejsKey,emailjsServiceId:ejsSid,emailjsTemplateId:ejsTid});
+    showToast('Configuración de email guardada ✓');
+  };
+  const testEmail=()=>{
+    if(!emailConfigured){showToast('Primero guardá la configuración de email',false);return;}
+    try{
+      emailjs.init(cfg.emailjsPublicKey);
+      emailjs.send(cfg.emailjsServiceId,cfg.emailjsTemplateId,{
+        to_email:cfg.directorEmail,
+        employee_name:'PRUEBA SISTEMA',
+        employee_rol:'Test',
+        hours:'1',
+        date:fmtDate(Date.now()),
+        reason:'Este es un email de prueba del sistema de Control de Acceso.',
+        type:'Franco / Tiempo libre',
+      }).then(()=>showToast('Email de prueba enviado ✓')).catch((e)=>{console.error(e);showToast('Error: '+JSON.stringify(e),false);});
+    }catch(e){showToast('Error: '+e.message,false);}
+  };
+
+  return(
+    <div style={{padding:14,display:'flex',flexDirection:'column',gap:12}}>
+
+      {/* PIN */}
+      <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:12,padding:16}}>
+        <div style={{fontSize:14,fontWeight:700,color:T.navy,marginBottom:10}}>🔑 PIN del Director</div>
+        <div style={{fontSize:12,color:T.text3,marginBottom:12}}>PIN actual: {'•'.repeat(cfg.directorPin?.length||4)}</div>
+        {[{l:'NUEVO PIN',v:p1,s:setP1},{l:'REPETIR PIN',v:p2,s:setP2}].map(({l,v,s})=>(
+          <div key={l} style={{marginBottom:10}}><Lbl>{l}</Lbl><input type="password" inputMode="numeric" maxLength={8} value={v} onChange={e=>s(e.target.value.replace(/\D/,''))} style={{...sty.input,letterSpacing:6,fontSize:20,textAlign:'center'}}/></div>
+        ))}
+        <button onClick={savePin} style={{width:'100%',padding:12,background:T.navy,color:T.white,border:'none',borderRadius:9,fontWeight:700,fontSize:14}}>Actualizar PIN</button>
+      </div>
+
+      {/* Email config */}
+      <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:12,padding:16}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+          <div style={{fontSize:14,fontWeight:700,color:T.navy}}>📧 Notificaciones por email</div>
+          <span style={{fontSize:11,fontWeight:700,padding:'3px 8px',borderRadius:10,background:emailConfigured?T.greenBg:T.amberBg,color:emailConfigured?T.green:T.amber,border:`1px solid ${emailConfigured?T.greenBd:T.amberBd}`}}>
+            {emailConfigured?'Activo':'Sin configurar'}
+          </span>
+        </div>
+        <div style={{fontSize:12,color:T.text3,marginBottom:14}}>
+          Cuando un empleado cargue una hora extra, te llega un email automático. Usá EmailJS (gratis hasta 200 emails/mes).
+        </div>
+
+        <Lbl>EMAIL DEL DIRECTOR (destinatario)</Lbl>
+        <input type="email" placeholder="tu@email.com" value={email} onChange={e=>setEmail(e.target.value)} style={{...sty.input,marginBottom:10}}/>
+
+        <div style={{background:T.grayBg,border:`1px solid ${T.border}`,borderRadius:8,padding:12,marginBottom:10}}>
+          <div style={{fontSize:11,fontWeight:700,color:T.navy,marginBottom:6}}>CREDENCIALES DE EMAILJS</div>
+          <div style={{fontSize:11,color:T.text3,marginBottom:8}}>Obtené estas credenciales en emailjs.com (es gratis)</div>
+          <Lbl>PUBLIC KEY</Lbl>
+          <input placeholder="Ej: user_xxxxxxxxxxxx" value={ejsKey} onChange={e=>setEjsKey(e.target.value)} style={{...sty.input,marginBottom:8,fontSize:13}}/>
+          <Lbl>SERVICE ID</Lbl>
+          <input placeholder="Ej: service_xxxxxxx" value={ejsSid} onChange={e=>setEjsSid(e.target.value)} style={{...sty.input,marginBottom:8,fontSize:13}}/>
+          <Lbl>TEMPLATE ID</Lbl>
+          <input placeholder="Ej: template_xxxxxxx" value={ejsTid} onChange={e=>setEjsTid(e.target.value)} style={{...sty.input,fontSize:13}}/>
+        </div>
+
+        <div style={{display:'flex',gap:8}}>
+          <button onClick={testEmail} style={{flex:1,padding:10,background:T.grayBg,color:T.navy,border:`1px solid ${T.border}`,borderRadius:8,fontWeight:600,fontSize:12}}>Enviar prueba</button>
+          <button onClick={saveEmail} style={{flex:2,padding:10,background:T.navy,color:T.white,border:'none',borderRadius:8,fontWeight:700,fontSize:13}}>Guardar configuración</button>
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
+/* ══ OVERTIME ALERT BANNER ════════════════════════════════ */
+
+/* ══ EMP LICENCIAS ════════════════════════════════════════ */
+function EmpLicencias({emp,myLic,cfg,showToast}){
+  const [showForm,setShowForm]=useState(false);
+  const [form,setForm]=useState({tipo:'Vacaciones',fechaDesde:todayISO(),fechaHasta:todayISO(),dias:'1',motivo:'',linkDoc:''});
+  const TIPOS=['Vacaciones','Retiro anticipado','Estudio','Mudanza','Medica','Duelo','Personal','Otro'];
+  const STATUS={pendiente:{col:T.amber,bg:T.amberBg,bd:T.amberBd,label:'Pendiente'},aprobado:{col:T.green,bg:T.greenBg,bd:T.greenBd,label:'Aprobado'},rechazado:{col:T.red,bg:T.redBg,bd:T.redBd,label:'Rechazado'}};
+  const totalAprobados=myLic.filter(l=>l.status==='aprobado').reduce((s,l)=>s+Number(l.dias),0);
+
+  const calcDias=()=>{
+    const d=Math.max(1,Math.round((new Date(form.fechaHasta)-new Date(form.fechaDesde))/(1000*60*60*24))+1);
+    return String(d);
+  };
+
+  const sendLicEmail=(req)=>{
+    const eid=cfg?.emailjsPublicKey,sid=cfg?.emailjsServiceId,tid=cfg?.emailjsTemplateId,to=cfg?.directorEmail;
+    if(!eid||!sid||!tid||!to)return;
+    try{
+      emailjs.init(eid);
+      emailjs.send(sid,tid,{
+        to_email:to,
+        employee_name:emp.nombre,employee_rol:emp.rol,
+        hours:req.dias+' dia(s)',
+        date:fmtDate(new Date(req.fechaDesde).getTime()+43200000)+' al '+fmtDate(new Date(req.fechaHasta).getTime()+43200000),
+        reason:(req.motivo||'Sin descripcion')+(req.linkDoc?' | Certificado: '+req.linkDoc:''),
+        type:'Licencia: '+req.tipo,
+      }).catch(e=>console.warn('EmailJS:',e));
+    }catch(e){console.warn(e);}
+  };
+
+  const submit=()=>{
+    if(!form.motivo.trim()&&form.tipo==='Otro'){showToast('Describe el motivo',false);return;}
+    const req={id:uid(),empId:emp.id,tipo:form.tipo,fechaDesde:form.fechaDesde,fechaHasta:form.fechaHasta,dias:form.tipo==='Retiro anticipado'?0:Number(calcDias()),horas:form.tipo==='Retiro anticipado'?Number(form.horas||0):null,motivo:form.motivo.trim(),linkDoc:form.linkDoc.trim()||null,status:'pendiente',createdAt:nowTs()};
+    ops.addLic(req);
+    sendLicEmail(req);
+    showToast('Solicitud enviada. Pendiente de aprobacion.');
+    setShowForm(false);
+    setForm({tipo:'Vacaciones',fechaDesde:todayISO(),fechaHasta:todayISO(),dias:'1',motivo:'',linkDoc:''});
+  };
+
+  return(
+    <div style={{padding:16}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+        <div style={{fontSize:15,fontWeight:700,color:T.navy}}>Licencias y Ausencias</div>
+        <button onClick={()=>setShowForm(v=>!v)} style={{padding:'8px 14px',background:T.navy,color:T.white,border:'none',borderRadius:8,fontSize:13,fontWeight:600}}>+ Solicitar</button>
+      </div>
+
+      {totalAprobados>0&&(
+        <div style={{background:T.purpleBg,border:`1px solid ${T.purpleBd}`,borderRadius:10,padding:14,marginBottom:12,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div><div style={{fontSize:11,fontWeight:700,color:T.purple,letterSpacing:.5}}>DIAS APROBADOS TOTAL</div><div style={{fontSize:12,color:T.text3,marginTop:2}}>Acumulado de solicitudes aprobadas</div></div>
+          <div style={{fontSize:22,fontWeight:700,color:T.purple}}>{totalAprobados}d</div>
+        </div>
+      )}
+
+      {showForm&&(
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:12,padding:14,marginBottom:14,animation:'slideUp .15s ease'}}>
+          <div style={{fontSize:13,fontWeight:700,color:T.navy,marginBottom:12}}>Nueva solicitud de licencia</div>
+          <Lbl>TIPO DE LICENCIA</Lbl>
+          <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:10}}>
+            {TIPOS.map(t=>(
+              <button key={t} onClick={()=>setForm({...form,tipo:t})} style={{padding:'6px 12px',borderRadius:16,border:`1px solid ${form.tipo===t?T.navy:T.border}`,background:form.tipo===t?T.navy:T.white,color:form.tipo===t?T.white:T.text,fontSize:12,fontWeight:form.tipo===t?700:400}}>
+                {t}
+              </button>
+            ))}
+          </div>
+          <div style={{display:'flex',gap:8,marginBottom:10}}>
+            <div style={{flex:1}}>
+              <Lbl>DESDE</Lbl>
+              <input type="date" value={form.fechaDesde} onChange={e=>{const d=e.target.value;setForm({...form,fechaDesde:d,fechaHasta:d>=form.fechaHasta?d:form.fechaHasta});}} style={{...sty.input}}/>
+            </div>
+            <div style={{flex:1}}>
+              <Lbl>HASTA</Lbl>
+              <input type="date" value={form.fechaHasta} onChange={e=>setForm({...form,fechaHasta:e.target.value})} min={form.fechaDesde} style={{...sty.input}}/>
+            </div>
+          </div>
+          {form.tipo==='Retiro anticipado'
+            ?<div style={{marginBottom:10}}><Lbl>HORAS A COMPENSAR</Lbl><input type="number" min="0.5" max="8" step="0.5" value={form.horas||''} onChange={e=>setForm({...form,horas:e.target.value})} placeholder="Ej: 2" style={{...sty.input}}/><div style={{fontSize:11,color:T.amber,marginTop:4}}>Estas horas deben compensarse en otra jornada.</div></div>
+            :<div style={{background:T.grayBg,borderRadius:8,padding:'8px 12px',marginBottom:10,fontSize:13,color:T.navy,fontWeight:600}}>Dias solicitados: {calcDias()}</div>
+          }
+          <Lbl>LINK A CERTIFICADO (opcional)</Lbl>
+          <input type="url" placeholder="Google Drive, OneDrive, etc." value={form.linkDoc} onChange={e=>setForm({...form,linkDoc:e.target.value})} style={{...sty.input,marginBottom:10}}/>
+          <Lbl>MOTIVO / DESCRIPCION (obligatorio para &quot;Otro&quot;)</Lbl>
+          <textarea value={form.motivo} onChange={e=>setForm({...form,motivo:e.target.value})} placeholder="Describe brevemente el motivo de la licencia..." rows={2} style={{...sty.input,resize:'vertical'}}/>
+          <div style={{display:'flex',gap:8,marginTop:8}}>
+            <button onClick={()=>setShowForm(false)} style={{padding:'11px 14px',background:T.white,border:`1px solid ${T.border}`,borderRadius:8,color:T.text3,fontSize:13}}>Cancelar</button>
+            <button onClick={submit} style={{flex:1,padding:11,background:T.navy,color:T.white,border:'none',borderRadius:8,fontWeight:700,fontSize:14}}>Enviar solicitud</button>
+          </div>
+        </div>
+      )}
+
+      {myLic.length===0&&!showForm&&(
+        <div style={{textAlign:'center',padding:'32px',color:T.text3,fontSize:13}}>Sin solicitudes. Usa "+ Solicitar" para pedir dias de licencia.</div>
+      )}
+
+      {myLic.map(l=>{
+        const s=STATUS[l.status]||STATUS.pendiente;
+        const colorTipo={Vacaciones:'0891B2',Estudio:'7C3AED',Mudanza:'D97706',Medica:T.red,Duelo:'6B7280',Personal:T.green,Otro:'374151'}[l.tipo]||T.navy;
+        return(
+          <div key={l.id} style={{background:T.white,border:`1px solid ${s.bd}`,borderRadius:10,padding:14,marginBottom:8}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
+              <div>
+                <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
+                  <span style={{fontSize:12,fontWeight:700,padding:'3px 9px',borderRadius:10,background:colorTipo+'18',color:colorTipo,border:`1px solid ${colorTipo}33`}}>{l.tipo}</span>
+                  <span style={{fontSize:13,fontWeight:700,color:T.text}}>{l.dias} dia{l.dias!==1?'s':''}</span>
+                </div>
+                <div style={{fontSize:12,color:T.text3}}>
+                  {fmtDate(new Date(l.fechaDesde).getTime()+43200000)} al {fmtDate(new Date(l.fechaHasta).getTime()+43200000)}
+                </div>
+              </div>
+              <span style={{padding:'3px 10px',borderRadius:12,background:s.bg,color:s.col,fontSize:11,fontWeight:700,border:`1px solid ${s.bd}`,whiteSpace:'nowrap'}}>{s.label}</span>
+            </div>
+            {l.motivo&&<div style={{fontSize:12,color:T.text2,fontStyle:'italic',borderLeft:`3px solid ${s.bd}`,paddingLeft:8,marginTop:4}}>{l.motivo}</div>}
+            {l.note&&<div style={{marginTop:6,fontSize:11,color:T.text3}}>Director: {l.note}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ══ DIR LICENCIAS ════════════════════════════════════════ */
+function DirLicencias({employees,licenses,cfg,showToast}){
+  const [note,setNote]=useState({});
+  const [filtEmp,setFiltEmp]=useState('all');
+  const getName=id=>employees.find(e=>e.id===id)?.nombre||'?';
+  const getCo=id=>CO[employees.find(e=>e.id===id)?.company]||{};
+  const pending=licenses.filter(l=>l.status==='pendiente');
+  const rest=licenses.filter(l=>l.status!=='pendiente').sort((a,b)=>b.createdAt-a.createdAt);
+  const approve=id=>{const l=licenses.find(x=>x.id===id);ops.updateLic(id,{status:'aprobado',approvedAt:nowTs(),note:note[id]||''});showToast('Licencia aprobada ✓');const emp=employees.find(e=>e.id===l?.empId);sendEmailToEmp(cfg,emp,'Tu licencia fue APROBADA',l?.tipo+' del '+fmtDate(new Date(l?.fechaDesde).getTime()+43200000)+'. Nota: '+(note[id]||'Sin nota'));};
+  const reject=id=>{const l=licenses.find(x=>x.id===id);ops.updateLic(id,{status:'rechazado',approvedAt:nowTs(),note:note[id]||''});showToast('Rechazado');const emp=employees.find(e=>e.id===l?.empId);sendEmailToEmp(cfg,emp,'Tu licencia fue RECHAZADA',l?.tipo+'. Nota del director: '+(note[id]||'Sin nota'));};
+  const TIPO_COLORS={Vacaciones:'0891B2','Retiro anticipado':'D97706',Estudio:'7C3AED',Mudanza:'EA580C',Medica:'DC2626',Duelo:'6B7280',Personal:'16A34A',Otro:'374151'};
+
+  // Summary by employee (approved)
+  const resumen={};
+  licenses.filter(l=>l.status==='aprobado').forEach(l=>{
+    if(!resumen[l.empId])resumen[l.empId]={};
+    resumen[l.empId][l.tipo]=(resumen[l.empId][l.tipo]||0)+l.dias;
+  });
+
+  const filtered=filtEmp==='all'?rest:rest.filter(l=>l.empId===filtEmp);
+
+  return(
+    <div style={{padding:14}}>
+      <div style={{fontSize:15,fontWeight:700,color:T.navy,marginBottom:12}}>Licencias y Ausencias</div>
+
+      {/* Pending */}
+      {pending.length===0?(
+        <div style={{background:T.greenBg,border:`1px solid ${T.greenBd}`,borderRadius:10,padding:14,textAlign:'center',marginBottom:12}}>
+          <div style={{fontSize:18,marginBottom:4}}>✓</div>
+          <div style={{fontSize:13,color:T.green,fontWeight:600}}>Sin solicitudes pendientes</div>
+        </div>
+      ):(
+        <>
+          <div style={{fontSize:11,fontWeight:700,color:T.amber,letterSpacing:.6,marginBottom:8}}>PENDIENTES DE APROBACION ({pending.length})</div>
+          {pending.map(l=>{
+            const co=getCo(l.empId);
+            const tc=TIPO_COLORS[l.tipo]||T.navy;
+            return(
+              <div key={l.id} style={{background:T.white,border:`2px solid ${T.amberBd}`,borderRadius:12,padding:14,marginBottom:10}}>
+                <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:14,color:T.text}}>{getName(l.empId)}</div>
+                    <div style={{fontSize:11,color:T.text3}}>{fmtDate(new Date(l.fechaDesde).getTime()+43200000)} al {fmtDate(new Date(l.fechaHasta).getTime()+43200000)}</div>
+                  </div>
+                  <div style={{textAlign:'right'}}>
+                    <div style={{fontSize:18,fontWeight:700,color:T.navy}}>{l.dias}d</div>
+                    <span style={{fontSize:9,fontWeight:700,padding:'1px 5px',borderRadius:4,background:co.bg||'#eee',color:co.color||T.text3}}>{co.badge}</span>
+                  </div>
+                </div>
+                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+                  <span style={{fontSize:12,fontWeight:700,padding:'3px 10px',borderRadius:10,background:tc+'18',color:tc,border:`1px solid ${tc}33`}}>{l.tipo}</span>
+                  {l.motivo&&<span style={{fontSize:12,color:T.text2,fontStyle:'italic'}}>"{l.motivo}"</span>}
+                </div>
+                <input placeholder="Nota de aprobacion (opcional)" value={note[l.id]||''} onChange={e=>setNote(p=>({...p,[l.id]:e.target.value}))} style={{...sty.input,marginBottom:8,fontSize:13}}/>
+                <div style={{display:'flex',gap:8}}>
+                  <button onClick={()=>reject(l.id)} style={{flex:1,padding:10,background:T.redBg,color:T.red,border:`1px solid ${T.redBd}`,borderRadius:8,fontWeight:700,fontSize:13}}>✕ Rechazar</button>
+                  <button onClick={()=>approve(l.id)} style={{flex:2,padding:10,background:T.green,color:T.white,border:'none',borderRadius:8,fontWeight:700,fontSize:13}}>✓ Aprobar {l.dias} dia{l.dias!==1?'s':''}</button>
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {/* Summary by employee */}
+      {Object.keys(resumen).length>0&&(
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:10,padding:14,marginBottom:12}}>
+          <div style={{fontSize:11,fontWeight:700,color:T.navy,letterSpacing:.6,marginBottom:10}}>RESUMEN POR EMPLEADO (aprobados)</div>
+          {Object.entries(resumen).map(([empId,tipos])=>(
+            <div key={empId} style={{padding:'8px 0',borderBottom:`1px solid ${T.grayBg}`}}>
+              <div style={{fontWeight:600,fontSize:13,color:T.text,marginBottom:4}}>{getName(empId)}</div>
+              <div style={{display:'flex',flexWrap:'wrap',gap:5}}>
+                {Object.entries(tipos).map(([tipo,dias])=>{
+                  const tc=TIPO_COLORS[tipo]||T.navy;
+                  return<span key={tipo} style={{fontSize:11,padding:'2px 8px',borderRadius:10,background:tc+'18',color:tc,border:`1px solid ${tc}33`,fontWeight:600}}>{tipo}: {dias}d</span>;
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* History */}
+      {rest.length>0&&(
+        <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:10,overflow:'hidden'}}>
+          <div style={{padding:'10px 14px',background:'#f8f9fb',borderBottom:`1px solid ${T.border}`,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <span style={{fontSize:11,fontWeight:700,color:T.text3,letterSpacing:.6}}>HISTORIAL</span>
+            <select value={filtEmp} onChange={e=>setFiltEmp(e.target.value)} style={{...sty.sel,flex:'none',fontSize:11,padding:'4px 8px'}}>
+              <option value="all">Todos</option>
+              {employees.map(e=><option key={e.id} value={e.id}>{e.nombre}</option>)}
+            </select>
+          </div>
+          {filtered.slice(0,12).map((l,i,arr)=>{
+            const s={aprobado:{c:T.green,l:'Aprobado'},rechazado:{c:T.red,l:'Rechazado'}}[l.status]||{};
+            const tc=TIPO_COLORS[l.tipo]||T.navy;
+            return(
+              <div key={l.id} style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',borderBottom:i<arr.length-1?`1px solid ${T.grayBg}`:'none',alignItems:'center'}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:T.text}}>{getName(l.empId)}</div>
+                  <div style={{display:'flex',alignItems:'center',gap:5,marginTop:2}}>
+                    <span style={{fontSize:10,fontWeight:700,padding:'1px 6px',borderRadius:8,background:tc+'18',color:tc}}>{l.tipo}</span>
+                    <span style={{fontSize:11,color:T.text3}}>{l.dias}d · {fmtDate(new Date(l.fechaDesde).getTime()+43200000)}</span>
+                  </div>
+                </div>
+                <span style={{fontSize:11,fontWeight:700,color:s.c}}>{s.l}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══ LIC ALERT BANNER ═════════════════════════════════════ */
+function LicAlertBanner({lic,employees,onClose}){
+  const emp=employees.find(e=>e.id===lic.empId)||{};
+  return(
+    <div style={{position:'fixed',top:0,left:'50%',transform:'translateX(-50%)',width:'100%',maxWidth:560,zIndex:9998,animation:'slideUp .25s ease',pointerEvents:'auto'}}>
+      <div style={{margin:'8px 12px',marginTop:60,background:T.navy,borderRadius:12,padding:'14px 16px',boxShadow:'0 8px 32px rgba(0,0,0,.35)',display:'flex',alignItems:'center',gap:12,border:`1px solid ${T.purpleBd}`}}>
+        <div style={{width:36,height:36,borderRadius:'50%',background:T.purpleBg,display:'flex',alignItems:'center',justifyContent:'center',fontSize:18,flexShrink:0}}>📅</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{color:T.white,fontSize:13,fontWeight:700,marginBottom:2}}>Nueva solicitud de licencia</div>
+          <div style={{color:'rgba(255,255,255,0.6)',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+            {emp.nombre} · {lic.tipo} · {lic.dias} dia{lic.dias!==1?'s':''}
+          </div>
+        </div>
+        <button onClick={onClose} style={{background:'rgba(255,255,255,0.1)',border:'none',color:'rgba(255,255,255,0.6)',borderRadius:6,padding:'4px 8px',fontSize:12,flexShrink:0}}>✕</button>
+      </div>
+    </div>
+  );
+}
+
+
+function OvtAlertBanner({ovt,employees,onClose}){
+  const emp=employees.find(e=>e.id===ovt.empId)||{};
+  const co=CO[emp.company]||{};
+  return(
+    <div style={{position:'fixed',top:0,left:'50%',transform:'translateX(-50%)',width:'100%',maxWidth:560,zIndex:9999,animation:'slideUp .25s ease',pointerEvents:'auto'}}>
+      <div style={{margin:'8px 12px',background:T.navy,borderRadius:12,padding:'14px 16px',boxShadow:'0 8px 32px rgba(0,0,0,.35)',display:'flex',alignItems:'center',gap:12,border:`1px solid ${T.amberBd}`}}>
+        <div style={{width:36,height:36,borderRadius:'50%',background:T.amberBg,display:'flex',alignItems:'center',justifyContent:'center',fontSize:18,flexShrink:0}}>⏱</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{color:T.white,fontSize:13,fontWeight:700,marginBottom:2}}>Nueva solicitud de horas extra</div>
+          <div style={{color:'rgba(255,255,255,0.6)',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+            {emp.nombre} · {ovt.horas}h · {ovt.motivo}
+          </div>
+        </div>
+        <button onClick={onClose} style={{background:'rgba(255,255,255,0.1)',border:'none',color:'rgba(255,255,255,0.6)',borderRadius:6,padding:'4px 8px',fontSize:12,flexShrink:0}}>✕</button>
+      </div>
+    </div>
+  );
+}
+
+/* ══ HELPERS ══════════════════════════════════════════════ */
+const sty={
+  input:{width:'100%',padding:'10px 12px',border:`1px solid ${T.border}`,borderRadius:8,fontSize:14,outline:'none',background:T.grayBg,color:T.text,display:'block'},
+  sel:{padding:'8px 10px',border:`1px solid ${T.border}`,borderRadius:8,fontSize:12,background:T.white,color:T.text,outline:'none',flex:1},
+};
+function Lbl({children}){return<div style={{fontSize:11,fontWeight:700,color:T.text3,letterSpacing:.4,marginBottom:5}}>{children}</div>;}
+function Toast({toast}){return<div style={{position:'fixed',bottom:80,left:'50%',transform:'translateX(-50%)',background:toast.ok?T.navy:T.red,color:T.white,padding:'10px 18px',borderRadius:8,fontSize:13,fontWeight:500,boxShadow:'0 4px 20px rgba(0,0,0,.2)',zIndex:9000,whiteSpace:'nowrap',animation:'slideUp .18s ease',pointerEvents:'none'}}>{toast.msg}</div>;}
+
+/* ══ ICONS ════════════════════════════════════════════════ */
+function IcoDash(){return<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>}
+function IcoList(){return<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>}
+function IcoClock2(){return<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>}
+function IcoPeople(){return<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><line x1="16" y1="11" x2="22" y2="11"/><line x1="19" y1="8" x2="19" y2="14"/></svg>}
+function IcoSettings(){return<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>}
+
+function IcoCalendar(){return<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>}
+
+function SchFlag({emp,rec}){
+  if(!emp||!rec||rec.type!=='entrada')return null;
+  const s=checkSchedule(emp,rec);
+  if(!s)return null;
+  return<div style={{fontSize:10,fontWeight:700,color:T.red}}>Tarde {s.min}m</div>;
+}
+
+ReactDOM.render(<App/>,document.getElementById('root'));
+</script>
+</body>
+</html>
